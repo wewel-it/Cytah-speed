@@ -1,0 +1,40 @@
+[package]
+name = "cytah-speed"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sha2 = "0.10"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+secp256k1 = { version = "0.28", features = ["recovery", "rand", "serde", "global-context"] }
+rand = "0.8"
+tokio = { version = "1.36", features = ["full"] }
+quinn = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+parking_lot = "0.12"
+libp2p = { version = "0.53", features = ["tcp", "dns", "tokio", "websocket", "noise", "yamux", "floodsub", "kad", "identify", "ping", "mdns", "macros"] }
+futures = "0.3"
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+reqwest = { version = "0.11", features = ["json"] }
+
+# smart contract dependencies
+wasmtime = "42"
+rocksdb = "0.20"
+
+[[bin]]
+name = "cytah"
+path = "src/main.rs"
+
+[lib]
+name = "cytah_core"
+path = "src/lib.rs"
