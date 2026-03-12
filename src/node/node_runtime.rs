@@ -36,6 +36,8 @@ pub struct NodeRuntime {
     pub finality_engine: Arc<FinalityEngine>,
     /// Execution engine
     pub executor: Arc<parking_lot::Mutex<TransactionExecutor>>,
+    /// Optional pruning helper (rolling window)
+    pub pruner: Option<Arc<parking_lot::Mutex<crate::storage::pruning::RollingWindowPruner>>>,
     /// Node ID
     pub node_id: [u8; 20],
     /// Block production interval (ms)
@@ -58,11 +60,21 @@ impl NodeRuntime {
         mempool_size: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let blockdag = Arc::new(RwLock::new(BlockDAG::new()));
-        let mempool = Arc::new(TxDagMempool::new(mempool_size));
-        let ghostdag = Arc::new(RwLock::new(GHOSTDAGEngine::new(2)));
+        // create state manager first so we can hand a reference to the mempool
         let state_manager = Arc::new(parking_lot::Mutex::new(StateManager::new()));
+        let mempool = Arc::new(TxDagMempool::new(
+            mempool_size,
+            state_manager.clone(),
+            crate::mempool::tx_dag_mempool::DEFAULT_MIN_GAS_PRICE,
+        ));
+        let ghostdag = Arc::new(RwLock::new(GHOSTDAGEngine::new(2)));
         let executor = Arc::new(parking_lot::Mutex::new(TransactionExecutor::new()));
         let finality_engine = Arc::new(FinalityEngine::new(confirmation_depth));
+        // pruning is optional; we always create a pruner but wrap in Arc+Mutex for
+        // interior mutability since `execute_block` borrows &self.
+        let pruner = Some(Arc::new(parking_lot::Mutex::new(
+            crate::storage::pruning::RollingWindowPruner::new("./pruner.db", 100_000),
+        )));
 
         let block_producer = Arc::new(BlockProducer::new(
             mempool.clone(),
@@ -80,6 +92,7 @@ impl NodeRuntime {
             block_producer,
             finality_engine,
             executor,
+            pruner,
             node_id,
             block_interval,
         })
@@ -132,8 +145,14 @@ impl NodeRuntime {
 
         drop(dag); // Release read lock
 
-        // Create block
-        match self.block_producer.create_block() {
+        // Determine difficulty using DAA and recent DAG state
+        let difficulty = crate::consensus::next_difficulty(&self.blockdag.read());
+        // Determine base fee using fee market calculation
+        let base_fee = crate::consensus::next_base_fee(&self.blockdag.read());
+        // update mempool with current base fee so it can enforce and order
+        self.mempool.set_base_fee(base_fee);
+        let state_root = self.state_manager.lock().get_state_root();
+        match self.block_producer.create_block(difficulty, base_fee, state_root) {
             Ok(block) => {
                 tracing::info!(
                     "Block produced: {} with {} transactions",
@@ -172,10 +191,26 @@ impl NodeRuntime {
         let result = exec.execute_block(block);
 
         if result.success {
-            // apply transactions from block
+            // apply transactions from block (state changes already applied during
+            // execution).  We still call the hook in case it is used later.
             let mut state = self.state_manager.lock();
             state.apply_block(&block.transactions)?;
-            tracing::debug!("Block executed: {} txs", result.executed_transactions);
+
+            // credit miner reward and collected fees
+            let mut total_miner_credit: u64 = 0;
+            // reward is fractional; floor for simplicity.
+            total_miner_credit = total_miner_credit.saturating_add(block.reward as u64);
+            total_miner_credit = total_miner_credit.saturating_add(result.total_fees);
+            state.credit_account(block.producer, total_miner_credit)?;
+
+            // perform pruning if configured (state manager helper wraps logic)
+            if let Some(pruner) = &self.pruner {
+                let mut p = pruner.lock();
+                let height = self.blockdag.read().block_count() as u64;
+                state.snapshot_and_prune(height, &mut p);
+            }
+
+            tracing::debug!("Block executed: {} txs, miner credit {}", result.executed_transactions, total_miner_credit);
         }
 
         Ok(())
@@ -215,7 +250,7 @@ impl NodeRuntime {
         (*self.mempool).validate_transaction(&tx)?;
 
         // Add ke mempool
-        (*self.mempool).add_transaction(tx.clone(), vec![])?;
+        (*self.mempool).add_transaction(tx.clone(), vec![], None)?;
 
         Ok(())
     }
@@ -240,9 +275,8 @@ impl NodeRuntime {
         (*self.mempool).size()
     }
 
-    /// Get connected peers
+    /// Get connected peers (P2P disabled in this runtime)
     pub fn get_connected_peers(&self) -> Vec<String> {
-        // TODO: Integrate with P2PNode
         Vec::new()
     }
 }
@@ -284,5 +318,29 @@ mod tests {
         let node = NodeRuntime::new([5; 20], 500, 3, 10, 1000);
         let peers = node.get_connected_peers();
         assert_eq!(peers.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_miner_reward_credit() {
+        // construct a simple environment and manually execute a block with one tx
+        let node = NodeRuntime::new([6; 20], 500, 3, 10, 1000);
+        node.initialize().await.unwrap();
+
+        // give sender enough balance
+        let sender: crate::core::transaction::Address = [9; 20];
+        node.state_manager.lock().state_tree.update_account(sender, crate::state::state_tree::Account::new(1000000, 0));
+        let receiver: crate::core::transaction::Address = [8; 20];
+
+        let mut tx = crate::core::transaction::Transaction::new_transfer(sender, receiver, 100, 0, 21000, 1);
+        tx.sign(&secp256k1::SecretKey::from_slice(&[1; 32]).unwrap()).unwrap();
+
+        let state_root = node.state_manager.lock().get_state_root();
+        let block = crate::core::Block::new(vec![], 0, vec![tx], 0, 0, 0, node.node_id, state_root);
+        // call the private helper which includes miner credit logic
+        let result = node.execute_block(&block).unwrap();
+        assert!(result.success);
+        let expected_credit = (block.reward as u64).saturating_add(result.total_fees);
+        let miner_acc = node.state_manager.lock().get_account(&block.producer).unwrap();
+        assert_eq!(miner_acc.balance, expected_credit);
     }
 }

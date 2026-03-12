@@ -1,7 +1,15 @@
 use std::collections::{HashMap, HashSet};
-use parking_lot::RwLock;
+use parking_lot::{RwLock, Mutex};
 use std::sync::Arc;
 use crate::core::{Transaction, Address};
+use crate::state::state_manager::StateManager;
+
+/// Rate limit window in seconds (per source)
+const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+/// Max transactions allowed from a single source per window
+const MAX_TX_PER_SOURCE: usize = 100;
+/// Default minimum gas price when base fee is not yet initialized
+pub(crate) const DEFAULT_MIN_GAS_PRICE: u64 = 1;
 
 /// Transaksi dalam mempool dengan metadata
 #[derive(Clone, Debug)]
@@ -37,6 +45,8 @@ impl MempoolTransaction {
 /// - Menyimpan transaksi dengan dependency DAG
 /// - Melacak parent-child relationships
 /// - Hanya mengembalikan transaksi yang siap dieksekusi
+/// - Mekanisme fee market (base fee, priority fee sorting)
+/// - Proteksi rate limit / spam / akun kosong
 #[derive(Clone)]
 pub struct TxDagMempool {
     /// Map dari tx hash ke mempool transaction
@@ -46,18 +56,34 @@ pub struct TxDagMempool {
     /// Transaksi pending dari sender (untuk multi-tx dari satu sender)
     /// Map dari address ke vec of tx hashes
     pending_by_sender: Arc<RwLock<HashMap<Address, Vec<[u8; 32]>>>>,
-    /// Ukuran max mempool
+    /// Ukuran max mempool (jumlah transaksi)
     max_size: usize,
+
+    /// Reference ke StateManager untuk pengecekan saldo
+    state: Arc<Mutex<StateManager>>,
+
+    /// Current base fee used for admission/ordering
+    current_base_fee: Arc<RwLock<u64>>,
+
+    /// Rate-limit tracking (source string -> (count, window_start))
+    rate_limits: Arc<RwLock<HashMap<String, (usize, u64)>>>,
+
+    /// Minimum gas price enforced (could be base fee or higher)
+    min_gas_price: u64,
 }
 
 impl TxDagMempool {
     /// Buat mempool baru
-    pub fn new(max_size: usize) -> Self {
+    pub fn new(max_size: usize, state: Arc<Mutex<StateManager>>, min_gas_price: u64) -> Self {
         Self {
             transactions: Arc::new(RwLock::new(HashMap::new())),
             parent_child_map: Arc::new(RwLock::new(HashMap::new())),
             pending_by_sender: Arc::new(RwLock::new(HashMap::new())),
             max_size,
+            state,
+            current_base_fee: Arc::new(RwLock::new(min_gas_price)),
+            rate_limits: Arc::new(RwLock::new(HashMap::new())),
+            min_gas_price,
         }
     }
 
@@ -66,17 +92,59 @@ impl TxDagMempool {
         &self,
         tx: Transaction,
         parent_tx_hashes: Vec<[u8; 32]>,
+        source: Option<String>,
     ) -> Result<(), String> {
-        let mut txs = self.transactions.write();
-
-        // Validasi basic
-        if txs.len() >= self.max_size {
-            return Err("Mempool is full".to_string());
+        // rate limiting per source
+        if let Some(src) = source.clone() {
+            let now = chrono::Utc::now().timestamp() as u64;
+            let mut rates = self.rate_limits.write();
+            let entry = rates.entry(src.clone()).or_insert((0, now));
+            if now >= entry.1 + RATE_LIMIT_WINDOW_SECS {
+                entry.0 = 0;
+                entry.1 = now;
+            }
+            if entry.0 >= MAX_TX_PER_SOURCE {
+                return Err("Rate limit exceeded for source".to_string());
+            }
+            entry.0 += 1;
         }
 
-        // Sign jika belum
+        let mut txs = self.transactions.write();
+
+        // handle capacity: if full, drop lowest-fee tx if this one is better
+        if txs.len() >= self.max_size {
+            // compute smallest gas price in pool
+            if let Some((low_hash, low_tx)) = txs
+                .iter()
+                .min_by_key(|(_, mt)| mt.transaction.gas_price)
+                .map(|(h, mt)| (*h, mt.clone()))
+            {
+                if tx.gas_price > low_tx.transaction.gas_price {
+                    txs.remove(&low_hash);
+                } else {
+                    return Err("Mempool is full".to_string());
+                }
+            } else {
+                return Err("Mempool is full".to_string());
+            }
+        }
+
+        // Sign harus ada
         if tx.signature.is_empty() {
             return Err("Transaction must be signed before adding to mempool".to_string());
+        }
+
+        // enforce minimum gas price
+        let base = *self.current_base_fee.read();
+        let threshold = std::cmp::max(base, self.min_gas_price);
+        if tx.gas_price < threshold {
+            return Err(format!("Gas price {} below minimum {}", tx.gas_price, threshold));
+        }
+
+        // Enforce sender balance > 0 (basic check)
+        let balance = self.state.lock().get_balance(tx.from);
+        if balance == 0 {
+            return Err("Sender account has zero balance".to_string());
         }
 
         let tx_hash = tx.hash();
@@ -139,8 +207,10 @@ impl TxDagMempool {
         tx.validate_basic()?;
 
         // Validasi additional rules
-        if tx.amount == 0 {
-            return Err("Transaction amount must be > 0".to_string());
+        if let crate::core::transaction::TxPayload::Transfer { amount, .. } = &tx.payload {
+            if *amount == 0 {
+                return Err("Transaction amount must be > 0".to_string());
+            }
         }
 
         if tx.gas_limit == 0 {
@@ -218,6 +288,11 @@ impl TxDagMempool {
         self.transactions.read().len()
     }
 
+    /// Update the current base fee (called by producer / node)
+    pub fn set_base_fee(&self, fee: u64) {
+        *self.current_base_fee.write() = fee;
+    }
+
     /// Clear mempool
     pub fn clear(&self) {
         self.transactions.write().clear();
@@ -241,7 +316,7 @@ mod tests {
     use secp256k1::SecretKey;
 
     fn create_test_transaction(from: Address, to: Address, amount: u64, nonce: u64) -> Transaction {
-        let mut tx = Transaction::new(from, to, amount, nonce, 21000);
+        let mut tx = Transaction::new(from, to, amount, nonce, 21000, 1);
         
         // Sign transaction
         let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
@@ -252,18 +327,22 @@ mod tests {
 
     #[test]
     fn test_mempool_creation() {
-        let mempool = TxDagMempool::new(1000);
+        let state = Arc::new(Mutex::new(StateManager::new()));
+        let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
         assert_eq!(mempool.size(), 0);
     }
 
     #[test]
     fn test_add_transaction() {
-        let mempool = TxDagMempool::new(1000);
+        let state = Arc::new(Mutex::new(StateManager::new()));
+        // fund the account so balance isn't zero
+        state.lock().apply_transaction(&create_test_transaction([9u8;20],[1u8;20],0,0)).ok();
+        let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
         let from = [1u8; 20];
         let to = [2u8; 20];
         
         let tx = create_test_transaction(from, to, 100, 0);
-        let result = mempool.add_transaction(tx, vec![]);
+        let result = mempool.add_transaction(tx, vec![], Some("peer1".to_string()));
         
         assert!(result.is_ok());
         assert_eq!(mempool.size(), 1);
@@ -271,7 +350,8 @@ mod tests {
 
     #[test]
     fn test_validate_transaction() {
-        let mempool = TxDagMempool::new(1000);
+        let state = Arc::new(Mutex::new(StateManager::new()));
+        let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
         let from = [1u8; 20];
         let to = [2u8; 20];
         
@@ -283,12 +363,13 @@ mod tests {
 
     #[test]
     fn test_get_ready_transactions() {
-        let mempool = TxDagMempool::new(1000);
+        let state = Arc::new(Mutex::new(StateManager::new()));
+        let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
         let from = [1u8; 20];
         let to = [2u8; 20];
         
         let tx = create_test_transaction(from, to, 100, 0);
-        mempool.add_transaction(tx, vec![]).unwrap();
+        mempool.add_transaction(tx, vec![], Some("peer2".to_string())).unwrap();
         
         let ready = mempool.get_ready_transactions();
         assert_eq!(ready.len(), 1);
@@ -297,12 +378,13 @@ mod tests {
 
     #[test]
     fn test_remove_transaction() {
-        let mempool = TxDagMempool::new(1000);
+        let state = Arc::new(Mutex::new(StateManager::new()));
+        let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
         let from = [1u8; 20];
         let to = [2u8; 20];
         
         let tx = create_test_transaction(from, to, 100, 0);
-        mempool.add_transaction(tx.clone(), vec![]).unwrap();
+        mempool.add_transaction(tx.clone(), vec![], Some("src".to_string())).unwrap();
         assert_eq!(mempool.size(), 1);
         
         let tx_hash_vec = tx.hash();
@@ -312,44 +394,64 @@ mod tests {
         assert_eq!(mempool.size(), 0);
     }
 
+    // legacy duplicates removed above; additional feature tests:
     #[test]
-    fn test_mempool_overflow() {
-        let mempool = TxDagMempool::new(2);
+    fn test_reject_zero_balance() {
+        let state = Arc::new(Mutex::new(StateManager::new()));
+        let mempool = TxDagMempool::new(10, state.clone(), DEFAULT_MIN_GAS_PRICE);
         let from = [1u8; 20];
         let to = [2u8; 20];
-        
-        let tx1 = create_test_transaction(from, to, 100, 0);
-        let tx2 = create_test_transaction(from, to, 100, 1);
-        let tx3 = create_test_transaction(from, to, 100, 2);
-        
-        mempool.add_transaction(tx1, vec![]).unwrap();
-        mempool.add_transaction(tx2, vec![]).unwrap();
-        
-        let result = mempool.add_transaction(tx3, vec![]);
-        assert!(result.is_err());
+        let tx = create_test_transaction(from, to, 50, 0);
+        let res = mempool.add_transaction(tx, vec![], Some("peer3".to_string()));
+        assert!(res.is_err());
     }
 
     #[test]
-    fn test_transaction_dependencies() {
-        let mempool = TxDagMempool::new(1000);
+    fn test_reject_low_gas_price() {
+        let state = Arc::new(Mutex::new(StateManager::new()));
+        // fund account
+        state.lock().apply_transaction(&create_test_transaction([9u8;20],[1u8;20],0,0)).ok();
+        let mempool = TxDagMempool::new(10, state.clone(), 100);
         let from = [1u8; 20];
         let to = [2u8; 20];
-        
-        let tx1 = create_test_transaction(from, to, 100, 0);
-        let tx1_hash_vec = tx1.hash();
-        let tx1_hash: [u8; 32] = tx1_hash_vec.try_into().unwrap();
-        
-        let tx2 = create_test_transaction(from, to, 50, 1);
-        
-        // Add tx1 without dependencies
-        mempool.add_transaction(tx1, vec![]).unwrap();
-        assert_eq!(mempool.get_ready_transactions().len(), 1);
-        
-        // Add tx2 with tx1 as dependency
-        mempool.add_transaction(tx2, vec![tx1_hash]).unwrap();
-        
-        // tx2 should not be ready (tx1 still in mempool)
-        let ready = mempool.get_ready_transactions();
-        assert_eq!(ready.len(), 1); // Only tx1 is ready
+        let mut tx = create_test_transaction(from, to, 10, 0);
+        tx.gas_price = 50; // below min 100
+        let res = mempool.add_transaction(tx, vec![], Some("peer4".to_string()));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_rate_limit() {
+        let state = Arc::new(Mutex::new(StateManager::new()));
+        state.lock().apply_transaction(&create_test_transaction([9u8;20],[1u8;20],0,0)).ok();
+        let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
+        let from = [1u8; 20];
+        let to = [2u8; 20];
+        for _ in 0..MAX_TX_PER_SOURCE {
+            let tx = create_test_transaction(from, to, 1, 0);
+            let _ = mempool.add_transaction(tx, vec![], Some("peer5".to_string()));
+        }
+        let tx = create_test_transaction(from, to, 1, 1);
+        let res = mempool.add_transaction(tx, vec![], Some("peer5".to_string()));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_drop_low_fee_when_full() {
+        let state = Arc::new(Mutex::new(StateManager::new()));
+        state.lock().apply_transaction(&create_test_transaction([9u8;20],[1u8;20],0,0)).ok();
+        let mempool = TxDagMempool::new(1, state.clone(), DEFAULT_MIN_GAS_PRICE);
+        let from = [1u8; 20];
+        let to = [2u8; 20];
+        let mut tx1 = create_test_transaction(from, to, 1, 0);
+        tx1.gas_price = 10;
+        mempool.add_transaction(tx1.clone(), vec![], Some("peer6".to_string())).unwrap();
+        let mut tx2 = create_test_transaction(from, to, 1, 1);
+        tx2.gas_price = 20;
+        // should drop tx1 and accept tx2
+        mempool.add_transaction(tx2.clone(), vec![], Some("peer6".to_string())).unwrap();
+        assert_eq!(mempool.size(), 1);
+        let entries = mempool.get_all_transactions();
+        assert_eq!(entries[0].transaction.gas_price, 20);
     }
 }

@@ -24,7 +24,7 @@ impl Account {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MerkleNode {
     pub hash: Hash,
     pub left: Option<Box<MerkleNode>>,
@@ -67,7 +67,7 @@ impl MerkleNode {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SparseMerkleTree {
     pub root: Option<MerkleNode>,
     pub leaves: HashMap<Address, Account>,

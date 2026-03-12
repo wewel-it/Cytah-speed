@@ -192,8 +192,8 @@ mod tests {
             to[i] = to[i].wrapping_add(b);
         }
         let amount = 100 + seed_bytes.len() as u64;
-        let tx = Transaction::new(from, to, amount, 0, 21000);
-        crate::Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42)
+        let tx = Transaction::new(from, to, amount, 0, 21000, 1);
+        crate::Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42, 0, 0, [0;20], [0;32])
     }
 
     #[test]

@@ -60,6 +60,39 @@ impl BlockStore {
         self.blocks.remove(hash)
     }
 
+    /// Roll back a sequence of blocks (e.g. during a chain reorganization).
+    ///
+    /// The caller should supply the hashes of the blocks being removed; the
+    /// store will delete them, replay the remaining blocks into `state` to
+    /// regenerate the correct state root, and return all transactions from the
+    /// removed blocks so they can be re‑added to the mempool.
+    pub fn rollback_blocks(
+        &mut self,
+        hashes: &[BlockHash],
+        state: &mut crate::state::state_manager::StateManager,
+        mempool: &crate::mempool::TxDagMempool,
+    ) -> Result<(), String> {
+        let mut removed_txs = Vec::new();
+        for h in hashes {
+            if let Some(block) = self.blocks.remove(h) {
+                for tx in &block.transactions {
+                    removed_txs.push(tx.clone());
+                }
+            }
+        }
+
+        // rebuild state from what's left in store
+        let remaining_blocks: Vec<_> = self.blocks.values().cloned().collect();
+        state.rebuild_from_blocks(&remaining_blocks)?;
+
+        // push removed txs back into mempool so they aren't lost
+        for tx in removed_txs {
+            let _ = mempool.add_transaction(tx, vec![], None);
+        }
+
+        Ok(())
+    }
+
     /// Clear entire store
     pub fn clear(&mut self) {
         self.blocks.clear();
@@ -69,7 +102,7 @@ impl BlockStore {
     pub fn get_blocks_by_parent(&self, parent_hash: &BlockHash) -> Vec<Block> {
         self.blocks
             .values()
-            .filter(|block| block.parent_hashes.contains(parent_hash))
+            .filter(|block| block.header.parent_hashes.contains(parent_hash))
             .cloned()
             .collect()
     }
@@ -113,8 +146,8 @@ mod tests {
             to[i] = to[i].wrapping_add(b);
         }
         let amount = 100 + seed_bytes.len() as u64;
-        let tx = Transaction::new(from, to, amount, 0, 21000);
-        Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42)
+        let tx = Transaction::new(from, to, amount, 0, 21000, 1);
+        Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42, 0, [0;20], [0;32])
     }
 
     #[test]
@@ -224,5 +257,47 @@ mod tests {
 
         store.clear();
         assert_eq!(store.block_count(), 0);
+    }
+
+    #[test]
+    fn test_rollback_blocks_restores_state_and_mempool() {
+        use crate::state::state_manager::StateManager;
+        use crate::mempool::TxDagMempool;
+        use std::sync::Arc;
+
+        let mut store = BlockStore::new();
+        let mut state = StateManager::new();
+        let mempool = TxDagMempool::new(100, Arc::new(parking_lot::Mutex::new(state.clone())), 1);
+
+        // build two sequential blocks with one tx each
+        let from = [1u8;20];
+        let to = [2u8;20];
+        let tx1 = crate::core::Transaction::new(from, to, 10, 0, 21000, 1);
+        let mut b1 = create_test_block("b1", vec![]);
+        b1.transactions = vec![tx1.clone()];
+        let h1 = b1.hash;
+
+        let tx2 = crate::core::Transaction::new(from, to, 20, 1, 21000, 1);
+        let mut b2 = create_test_block("b2", vec![h1]);
+        b2.transactions = vec![tx2.clone()];
+        let h2 = b2.hash;
+
+        store.insert_block(b1.clone()).unwrap();
+        store.insert_block(b2.clone()).unwrap();
+
+        // apply both txs to state so it reflects full chain
+        state.apply_transaction(&tx1).unwrap();
+        state.apply_transaction(&tx2).unwrap();
+
+        // rollback second block
+        store.rollback_blocks(&[h2], &mut state, &mempool).unwrap();
+
+        // block two should no longer exist
+        assert!(!store.block_exists(&h2));
+        // state should equal state after only tx1
+        let acc = state.get_account(&from).unwrap();
+        assert!(acc.balance < u64::MAX);
+        // mempool should contain tx2 again
+        assert_eq!(mempool.size(), 1);
     }
 }

@@ -69,8 +69,7 @@ impl CLIInterface {
         *self.node.write() = Some(node);
 
         println!("✓ Node started");
-        // tips method may differ, just display placeholder
-        println!("Node initialized");
+        println!("Node initialized and ready to accept transactions");
 
         Ok(())
     }
@@ -122,7 +121,7 @@ impl CLIInterface {
         let nonce: u64 = nonce_str.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
 
         // Create and sign transaction
-        let mut tx = Transaction::new_transfer(from, to, amount, nonce, 21000);
+        let mut tx = Transaction::new_transfer(from, to, amount, nonce, 21000, 1);
 
         // Sign dengan test key
         let secret_key = SecretKey::from_slice(&[1; 32])
@@ -205,7 +204,10 @@ impl CLIInterface {
             println!(
                 "  [{}] {} tokens, nonce={}",
                 i,
-                tx.transaction.amount,
+                match &tx.transaction.payload {
+                    crate::core::transaction::TxPayload::Transfer { amount, .. } => *amount,
+                    _ => 0,
+                },
                 tx.transaction.nonce
             );
         }

@@ -46,6 +46,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Contract { contract_command } => {
+            match contract_command {
+                cytah_core::cli::cli::ContractCommands::Deploy { wasm, wallet, rpc_url } => {
+                    handler.handle_contract_deploy(&wasm, wallet.as_deref(), &rpc_url).await?;
+                }
+                cytah_core::cli::cli::ContractCommands::Call { contract, method, args, wallet, rpc_url } => {
+                    handler.handle_contract_call(&contract, &method, args.as_deref(), wallet.as_deref(), &rpc_url).await?;
+                }
+            }
+        }
     }
 
     Ok(())

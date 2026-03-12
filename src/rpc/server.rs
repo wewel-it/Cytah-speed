@@ -91,7 +91,7 @@ pub async fn send_transaction(
 
     // Add to mempool
     let mempool = state.mempool.lock().clone();
-    if let Err(_e) = mempool.add_transaction(request.transaction, vec![]) {
+    if let Err(_e) = mempool.add_transaction(request.transaction, vec![], None) {
         tracing::error!("Failed to add transaction to mempool");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -177,10 +177,35 @@ pub async fn get_dag_info(State(state): State<RpcState>) -> Json<DagResponse> {
     })
 }
 
+/// helper to parse a cyt-style address (cyt + 40 hex chars)
+fn parse_address(addr_str: &str) -> Result<[u8; 20], StatusCode> {
+    if !addr_str.starts_with("cyt") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let bytes = hex::decode(&addr_str[3..]).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if bytes.len() != 20 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let mut arr = [0u8; 20];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
 /// GET /node/info - Get node information
 pub async fn get_node_info(State(state): State<RpcState>) -> Result<Json<NodeInfoResponse>, StatusCode> {
-    let peer_id = "unknown".to_string();
-    let connected_peers = vec![];
+    // peer id and peers come from optional P2P node
+    let (peer_id, connected_peers) = if let Some(node_arc) = &state.p2p_node {
+        let node = node_arc.read().await;
+        // PeerManager does not expose local id, so leave as unknown for now
+        let peers: Vec<String> = node
+            .get_connected_peers()
+            .into_iter()
+            .map(|p| p.to_string())
+            .collect();
+        ("unknown".to_string(), peers)
+    } else {
+        ("unknown".to_string(), Vec::new())
+    };
 
     // Get mempool size
     let mempool = state.mempool.lock().clone();
@@ -200,6 +225,8 @@ pub async fn get_node_info(State(state): State<RpcState>) -> Result<Json<NodeInf
 
 #[derive(Deserialize)]
 pub struct DeployContractRequest {
+    pub from: String,
+    pub nonce: u64,
     pub wasm_code: String, // hex-encoded
     pub init_args: Option<String>,
 }
@@ -212,6 +239,8 @@ pub struct DeployContractResponse {
 
 #[derive(Deserialize)]
 pub struct CallContractRequest {
+    pub from: String,
+    pub nonce: u64,
     pub contract_address: String,
     pub method: String,
     pub args: Option<String>, // hex-encoded
@@ -237,13 +266,20 @@ pub async fn deploy_contract(
         Vec::new()
     };
 
-    // Create transaction
-    let from: [u8;20] = [0;20]; // TODO: get from auth context
-    let tx = crate::core::transaction::Transaction::new_deploy(from, wasm_code, init_args, 0, 1_000_000);
+    // Parse sender address provided by client
+    let from = parse_address(&request.from)?;
+    let tx = crate::core::transaction::Transaction::new_deploy(
+        from,
+        wasm_code,
+        init_args,
+        request.nonce,
+        1_000_000,
+        1, // gas price
+    );
 
     // Submit to mempool
     let mempool = state.mempool.lock().clone();
-    if let Err(_e) = mempool.add_transaction(tx.clone(), vec![]) {
+    if let Err(_e) = mempool.add_transaction(tx.clone(), vec![], None) {
         tracing::error!("Failed to add contract deploy transaction to mempool");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -286,20 +322,21 @@ pub async fn call_contract(
         Vec::new()
     };
 
-    // Create transaction
-    let from: [u8;20] = [0;20]; // TODO: get from auth context
+    // Parse sender address from request
+    let from = parse_address(&request.from)?;
     let tx = crate::core::transaction::Transaction::new_call(
         from,
         addr_bytes,
         request.method.clone(),
         args,
-        0,
+        request.nonce,
         1_000_000,
+        1, // gas price
     );
 
     // Submit to mempool
     let mempool = state.mempool.lock().clone();
-    if let Err(_e) = mempool.add_transaction(tx, vec![]) {
+    if let Err(_e) = mempool.add_transaction(tx, vec![], None) {
         tracing::error!("Failed to add contract call transaction to mempool");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }

@@ -42,14 +42,18 @@ impl BlockDAG {
     /// Create automatic genesis block
     pub fn create_genesis_block(&mut self) -> Block {
         let genesis = Block::new(
-            vec![],
+            vec![],               // no parents
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            vec![],
-            0,
-        );
+            vec![],               // empty tx list
+            0, // nonce
+            0, // difficulty
+            0, // base fee
+            [0; 20], // producer placeholder
+            [0u8;32], // genesis state root zero
+            );
 
         let _ = self.insert_block(genesis.clone());
         genesis
@@ -67,8 +71,8 @@ impl BlockDAG {
         }
 
         // Step 3: Validate references - all parents must exist
-        if !block.parent_hashes.is_empty() {
-            for parent_hash in &block.parent_hashes {
+        if !block.header.parent_hashes.is_empty() {
+            for parent_hash in &block.header.parent_hashes {
                 if !self.store.block_exists(parent_hash) {
                     return Err(format!("Parent block {} does not exist", hex::encode(parent_hash)));
                 }
@@ -147,7 +151,7 @@ impl BlockDAG {
         self.get_block(hash)
             .map(|block| {
                 block
-                    .parent_hashes
+                    .header.parent_hashes
                     .iter()
                     .filter_map(|ph| self.get_block(ph))
                     .collect()
@@ -162,7 +166,7 @@ impl BlockDAG {
 
         // Validate all parent references exist
         for block in self.store.get_all_blocks() {
-            for parent_hash in &block.parent_hashes {
+            for parent_hash in &block.header.parent_hashes {
                 if !self.store.block_exists(parent_hash) {
                     return Err(format!(
                         "Block {} references non-existent parent {}",
@@ -187,11 +191,11 @@ impl BlockDAG {
         // Check tips are actually leaves
         let tip_set: HashSet<_> = self.get_tips().into_iter().collect();
         for block in &blocks {
-            if block.parent_hashes.is_empty() && tip_set.len() > 1 {
+            if block.header.parent_hashes.is_empty() && tip_set.len() > 1 {
                 // Genesis should not be a tip if we have other blocks
                 let in_some_parent_set = blocks
                     .iter()
-                    .any(|b| b.parent_hashes.contains(&block.hash));
+                    .any(|b| b.header.parent_hashes.contains(&block.hash));
                 if in_some_parent_set {
                     return Err("Genesis block is referenced but still marked as tip".to_string());
                 }
@@ -208,7 +212,7 @@ impl BlockDAG {
 
         let total_txs: usize = blocks.iter().map(|b| b.transactions.len()).sum();
         let avg_parents = if !blocks.is_empty() {
-            blocks.iter().map(|b| b.parent_hashes.len()).sum::<usize>() / blocks.len()
+            blocks.iter().map(|b| b.header.parent_hashes.len()).sum::<usize>() / blocks.len()
         } else {
             0
         };
@@ -265,7 +269,7 @@ impl BlockDAG {
             .unwrap_or_default()
             .as_secs();
 
-        Block::new(tips, timestamp, transactions, 0)
+        Block::new(tips, timestamp, transactions, 0, 0, 0, [0;20], [0;32])
     }
 
     /// Rebuild index from scratch
@@ -327,8 +331,8 @@ mod tests {
             to[i] = to[i].wrapping_add(b);
         }
         let amount = 100 + seed_bytes.len() as u64;
-        let tx = Transaction::new(from, to, amount, 0, 21000);
-        Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42)
+        let tx = Transaction::new(from, to, amount, 0, 21000, 1);
+        Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42, 0, 0, [0;20], [0;32])
     }
 
     #[test]

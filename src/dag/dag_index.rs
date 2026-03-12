@@ -24,7 +24,7 @@ impl DAGIndex {
         let blocks = store.get_all_blocks();
 
         for block in &blocks {
-            for parent_hash in &block.parent_hashes {
+            for parent_hash in &block.header.parent_hashes {
                 index
                     .parent_to_children
                     .entry(*parent_hash)
@@ -36,7 +36,7 @@ impl DAGIndex {
         // Calculate tips
         let mut potential_tips: HashSet<_> = blocks.iter().map(|b| b.hash).collect();
         for block in &blocks {
-            for parent in &block.parent_hashes {
+            for parent in &block.header.parent_hashes {
                 potential_tips.remove(parent);
             }
         }
@@ -87,7 +87,7 @@ impl DAGIndex {
 
         while let Some(current) = queue.pop_front() {
             if let Some(block) = store.get_block(&current) {
-                for parent_hash in &block.parent_hashes {
+                for parent_hash in &block.header.parent_hashes {
                     if !ancestors.contains(parent_hash) {
                         ancestors.insert(parent_hash.clone());
                         queue.push_back(parent_hash.clone());
@@ -115,12 +115,12 @@ impl DAGIndex {
         self.tips.insert(new_block.hash.clone());
 
         // Remove parents from tips (they now have children)
-        for parent_hash in &new_block.parent_hashes {
+        for parent_hash in &new_block.header.parent_hashes {
             self.tips.remove(parent_hash);
         }
 
         // Update parent_to_children mapping
-        for parent_hash in &new_block.parent_hashes {
+        for parent_hash in &new_block.header.parent_hashes {
             self.parent_to_children
                 .entry(parent_hash.clone())
                 .or_insert_with(Vec::new)
@@ -146,7 +146,7 @@ impl DAGIndex {
             }
 
             if let Some(block) = store.get_block(&current) {
-                for parent in &block.parent_hashes {
+                for parent in &block.header.parent_hashes {
                     if !visited.contains(parent) {
                         queue.push_back(parent.clone());
                     }
@@ -177,7 +177,7 @@ impl DAGIndex {
             reachable.insert(current.clone());
 
             if let Some(block) = store.get_block(&current) {
-                for parent in &block.parent_hashes {
+                for parent in &block.header.parent_hashes {
                     if !reachable.contains(parent) {
                         queue.push_back(parent.clone());
                     }
@@ -196,8 +196,8 @@ impl DAGIndex {
 
         let blocks = store.get_all_blocks();
         for block in &blocks {
-            in_degree.insert(block.hash.clone(), block.parent_hashes.len());
-            if block.parent_hashes.is_empty() {
+            in_degree.insert(block.hash.clone(), block.header.parent_hashes.len());
+            if block.header.parent_hashes.is_empty() {
                 queue.push_back(block.hash.clone());
             }
         }
@@ -228,8 +228,8 @@ impl DAGIndex {
 
             for block_hash in current_queue {
                 if let Some(block) = store.get_block(&block_hash) {
-                    if !block.parent_hashes.is_empty() {
-                        for parent in &block.parent_hashes {
+                    if !block.header.parent_hashes.is_empty() {
+                        for parent in &block.header.parent_hashes {
                             if !next_queue.contains(parent) {
                                 next_queue.push(parent.clone());
                             }
@@ -260,7 +260,7 @@ impl DAGIndex {
         let mut coparents = HashSet::new();
 
         if let Some(block) = store.get_block(hash) {
-            for parent_hash in &block.parent_hashes {
+            for parent_hash in &block.header.parent_hashes {
                 for child in self.get_children(parent_hash) {
                     if child != *hash {
                         coparents.insert(child);
@@ -295,8 +295,8 @@ mod tests {
             to[i] = to[i].wrapping_add(b);
         }
         let amount = 100 + seed_bytes.len() as u64;
-        let tx = Transaction::new(from, to, amount, 0, 21000);
-        Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42)
+        let tx = Transaction::new(from, to, amount, 0, 21000, 1);
+        Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42, 0, 0, [0;20], [0;32])
     }
 
     #[test]

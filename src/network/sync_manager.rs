@@ -4,9 +4,11 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use libp2p::PeerId;
 use crate::core::{Block, BlockHash};
+use crate::core::block::BlockHeader;
 use crate::dag::blockdag::BlockDAG;
 use crate::network::message::NetworkMessage;
 use crate::network::PeerManager;
+use crate::state::state_manager::StateManager;
 
 /// Sync manager for DAG synchronization across peers
 pub struct SyncManager {
@@ -18,6 +20,8 @@ pub struct SyncManager {
     message_sender: mpsc::UnboundedSender<(PeerId, NetworkMessage)>,
     /// Set of blocks we're currently requesting
     pending_requests: Arc<RwLock<HashSet<BlockHash>>>,
+    /// Optional state manager for fast sync
+    pub state: Arc<parking_lot::Mutex<StateManager>>,
 }
 
 impl SyncManager {
@@ -26,12 +30,14 @@ impl SyncManager {
         dag: Arc<RwLock<BlockDAG>>,
         peer_manager: Arc<PeerManager>,
         message_sender: mpsc::UnboundedSender<(PeerId, NetworkMessage)>,
+        state: Arc<parking_lot::Mutex<StateManager>>,
     ) -> Self {
         Self {
             dag,
             peer_manager,
             message_sender,
             pending_requests: Arc::new(RwLock::new(HashSet::new())),
+            state,
         }
     }
 
@@ -132,6 +138,68 @@ impl SyncManager {
     pub fn is_synced(&self) -> bool {
         let pending = self.pending_requests.read();
         pending.is_empty()
+    }
+
+    /// Process a batch of headers received from a peer
+    pub async fn handle_headers(&self, headers: Vec<BlockHeader>) -> Result<(), String> {
+        let mut dag = self.dag.write();
+        for h in headers {
+            // create placeholder block carrying only header information
+            let mut blk = Block::new(vec![], h.timestamp, vec![], 0, h.difficulty, h.base_fee, [0;20], h.state_root);
+            blk.header = h.clone();
+            dag.insert_block(blk)?;
+        }
+        Ok(())
+    }
+
+    /// Handle incoming sync-related network message
+    pub async fn handle_message(&self, peer: PeerId, msg: NetworkMessage) -> Result<(), String> {
+        match msg {
+            NetworkMessage::GetHeaders { from, max } => {
+                // locate headers after `from`
+                let dag = self.dag.read();
+                let order = dag.get_topological_order();
+                let mut headers = Vec::new();
+                let mut include = from == [0u8;32];
+                for hash in order {
+                    if !include {
+                        if hash == from {
+                            include = true;
+                        }
+                        continue;
+                    }
+                    if let Some(b) = dag.get_block(&hash) {
+                        headers.push(b.header.clone());
+                        if headers.len() >= max {
+                            break;
+                        }
+                    }
+                }
+                let _ = self.message_sender.send((peer, NetworkMessage::Headers(headers)));
+                Ok(())
+            }
+            NetworkMessage::GetBlocks(hashes) => {
+                let mut blocks = Vec::new();
+                let dag = self.dag.read();
+                for h in hashes {
+                    if let Some(b) = dag.get_block(&h) {
+                        blocks.push(b);
+                    }
+                }
+                let _ = self.message_sender.send((peer, NetworkMessage::Blocks(blocks)));
+                Ok(())
+            }
+            NetworkMessage::RequestState => {
+                // serialize current state
+                let snapshot = {
+                    let s = self.state.lock();
+                    bincode::serialize(&*s).map_err(|e| e.to_string())?
+                };
+                let _ = self.message_sender.send((peer, NetworkMessage::StateSnapshot(snapshot)));
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Get sync status

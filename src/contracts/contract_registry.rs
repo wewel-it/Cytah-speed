@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ContractInfo {
     pub address: [u8;20],
     pub bytecode: Vec<u8>,
     pub metadata: Vec<u8>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ContractRegistry {
     contracts: HashMap<[u8;20], ContractInfo>,
 }

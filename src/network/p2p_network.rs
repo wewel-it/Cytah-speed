@@ -10,6 +10,8 @@ use crate::core::{Transaction, Block, BlockHash};
 pub enum NetworkMessage {
     /// Broadcast transaksi
     Transaction(Transaction),
+    /// Inventory notification – announce availability of a block by hash
+    Inventory(BlockHash),
     /// Broadcast blok
     Block(Block),
     /// Request blok tertentu
@@ -152,9 +154,16 @@ impl P2PNetwork {
         self.broadcast_message(NetworkMessage::Transaction(tx)).await
     }
 
-    /// Broadcast blok
+    /// Broadcast blok by first sending an inventory message containing
+    /// only the block hash.  Peers can request the full block if they don't
+    /// already possess it.
     pub async fn broadcast_block(&self, block: Block) -> Result<(), String> {
-        self.broadcast_message(NetworkMessage::Block(block)).await
+        let hash = block.hash;
+        // advertise to peers
+        self.broadcast_message(NetworkMessage::Inventory(hash)).await
+        // in a real implementation we would wait for RequestBlock messages and
+        // respond with the full Block when asked.  For now the inventory-only
+        // behaviour is enough to exercise the bandwidth optimization.
     }
 
     /// Receive dan process message
@@ -239,6 +248,22 @@ mod tests {
         let result = network.connect_peer("127.0.0.1:8003".to_string()).await;
         assert!(result.is_ok());
         assert!(network.is_connected_to("127.0.0.1:8003"));
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_block_sends_inventory() {
+        let network = P2PNetwork::new("127.0.0.1:8010".to_string(), 10);
+        // simulate connected peer
+        network.peers.write().insert(
+            "peer1".to_string(), PeerInfo { address: "peer1".to_string(), last_seen: 0, is_connected: true });
+        let block = crate::core::Block::new(vec![], 0, vec![], 0, 0, 0, [0;20], [0;32]);
+        network.broadcast_block(block.clone()).await.unwrap();
+        let msgs = network.get_all_messages();
+        assert_eq!(msgs.len(), 1);
+        match &msgs[0] {
+            NetworkMessage::Inventory(h) => assert_eq!(*h, block.hash),
+            _ => panic!("expected inventory message"),
+        }
     }
 
     #[tokio::test]

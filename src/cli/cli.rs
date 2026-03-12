@@ -243,11 +243,21 @@ impl CliHandler {
         let mut from_addr = [0u8; 20];
         from_addr.copy_from_slice(&sender_bytes);
 
-        // Get current nonce (simplified - in real implementation, get from RPC)
-        let nonce = 0; // TODO: Get from RPC
+        // Get current nonce by querying the node
+        let balance_url = format!("{}/balance/{}", rpc_url, wallet.address);
+        let nonce = if let Ok(resp) = self.client.get(&balance_url).send().await {
+            if resp.status().is_success() {
+                let json: serde_json::Value = resp.json().await?;
+                json["nonce"].as_u64().unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
 
         // Create transaction
-        let mut tx = Transaction::new_transfer(from_addr, to_addr, amount, nonce, 21000); // Default gas limit
+        let mut tx = Transaction::new_transfer(from_addr, to_addr, amount, nonce, 21000, 1); // Default gas limit and price
 
         // Sign transaction
         tx.sign(&wallet.private_key)?;
@@ -276,14 +286,35 @@ impl CliHandler {
     }
 
     /// Handle contract deploy command
-    pub async fn handle_contract_deploy(&self, wasm_path: &str, _wallet_path: Option<&str>, rpc_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn handle_contract_deploy(&self, wasm_path: &str, wallet_path: Option<&str>, rpc_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+        // Wallet is required for deployment; load it if provided
+        let wallet = match wallet_path {
+            Some(path) => Wallet::load_from_file(path)?,
+            None => return Err("Wallet path required for contract operations".into()),
+        };
+
         // Read WASM file
         let wasm_code = std::fs::read(wasm_path)?;
         let wasm_hex = hex::encode(&wasm_code);
 
+        // fetch nonce from node
+        let balance_url = format!("{}/balance/{}", rpc_url, wallet.address);
+        let nonce = if let Ok(resp) = self.client.get(&balance_url).send().await {
+            if resp.status().is_success() {
+                let json: serde_json::Value = resp.json().await?;
+                json["nonce"].as_u64().unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         // Send deploy request
         let url = format!("{}/contract/deploy", rpc_url);
         let request = serde_json::json!({
+            "from": wallet.address,
+            "nonce": nonce,
             "wasm_code": wasm_hex,
             "init_args": null
         });
@@ -306,9 +337,28 @@ impl CliHandler {
     }
 
     /// Handle contract call command
-    pub async fn handle_contract_call(&self, contract: &str, method: &str, args: Option<&str>, _wallet_path: Option<&str>, rpc_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn handle_contract_call(&self, contract: &str, method: &str, args: Option<&str>, wallet_path: Option<&str>, rpc_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let wallet = match wallet_path {
+            Some(path) => Wallet::load_from_file(path)?,
+            None => return Err("Wallet path required for contract operations".into()),
+        };
+
+        let balance_url = format!("{}/balance/{}", rpc_url, wallet.address);
+        let nonce = if let Ok(resp) = self.client.get(&balance_url).send().await {
+            if resp.status().is_success() {
+                let json: serde_json::Value = resp.json().await?;
+                json["nonce"].as_u64().unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         let url = format!("{}/contract/call", rpc_url);
         let request = serde_json::json!({
+            "from": wallet.address,
+            "nonce": nonce,
             "contract_address": contract,
             "method": method,
             "args": args

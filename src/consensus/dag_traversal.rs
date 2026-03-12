@@ -21,7 +21,7 @@ impl DAGTraversal {
             visited.insert(current.clone());
 
             if let Some(block) = dag.get_block(&current) {
-                for parent_hash in &block.parent_hashes {
+                for parent_hash in &block.header.parent_hashes {
                     if !ancestors.contains(parent_hash) && parent_hash != hash {
                         ancestors.insert(parent_hash.clone());
                         queue.push_back(parent_hash.clone());
@@ -61,7 +61,7 @@ impl DAGTraversal {
     /// Get direct parents of a block
     pub fn get_parents(dag: &BlockDAG, hash: &BlockHash) -> Vec<BlockHash> {
         dag.get_block(hash)
-            .map(|b| b.parent_hashes.clone())
+            .map(|b| b.header.parent_hashes.clone())
             .unwrap_or_default()
     }
 
@@ -236,8 +236,8 @@ mod tests {
             to[i] = to[i].wrapping_add(b);
         }
         let amount = 100 + seed_bytes.len() as u64;
-        let tx = Transaction::new(from, to, amount, 0, 21000);
-        crate::Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42)
+        let tx = Transaction::new(from, to, amount, 0, 21000, 1);
+        crate::Block::new(parents, 1000 + hash_seed.len() as u64, vec![tx], 42, 0, 0, [0;20], [0;32])
     }
 
     #[test]

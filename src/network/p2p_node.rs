@@ -15,6 +15,7 @@ use libp2p::{
 use futures::StreamExt;
 use crate::core::{Block, Transaction};
 use crate::dag::blockdag::BlockDAG;
+use crate::state::state_manager::StateManager;
 use crate::network::{
     PeerManager, GossipProtocol, SyncManager, NetworkMessage
 };
@@ -73,6 +74,7 @@ unsafe impl Sync for P2PNode {}impl P2PNode {
     /// Create a new P2P node
     pub async fn new(
         dag: Arc<RwLock<BlockDAG>>,
+        state: Arc<parking_lot::Mutex<StateManager>>,
         listen_addr: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Generate a random keypair
@@ -105,6 +107,7 @@ unsafe impl Sync for P2PNode {}impl P2PNode {
             dag,
             peer_manager.clone(),
             message_sender.clone(),
+            state.clone(),
         ));
 
         // Create floodsub for gossip
@@ -205,7 +208,9 @@ unsafe impl Sync for P2PNode {}impl P2PNode {
         match event {
             OutEvent::Floodsub(libp2p::floodsub::FloodsubEvent::Message(msg)) => {
                 if let Ok(network_msg) = serde_json::from_slice::<NetworkMessage>(&msg.data) {
-                    self.handle_network_message(network_msg).await;
+                    // `msg.source` is a PeerId identifying the sender
+                    let peer = msg.source;
+                    self.handle_network_message(peer, network_msg).await;
                 }
             }
             OutEvent::Floodsub(_) => {} // Ignore other floodsub events
@@ -227,7 +232,7 @@ unsafe impl Sync for P2PNode {}impl P2PNode {
     }
 
     /// Handle incoming network messages
-    async fn handle_network_message(&self, message: NetworkMessage) {
+    async fn handle_network_message(&self, peer: PeerId, message: NetworkMessage) {
         match message {
             NetworkMessage::NewBlock(block) => {
                 // Handle new block via gossip
@@ -255,6 +260,36 @@ unsafe impl Sync for P2PNode {}impl P2PNode {
                 // Handle DAG response
                 if let Err(e) = self.sync_manager.handle_dag_response(blocks).await {
                     tracing::error!("Failed to handle DAG response: {}", e);
+                }
+            }
+            NetworkMessage::GetHeaders { from, max } => {
+                let _ = self.sync_manager.handle_message(peer.clone(), NetworkMessage::GetHeaders { from, max }).await;
+            }
+            NetworkMessage::Headers(headers) => {
+                // hand off to sync manager for processing
+                let _ = self.sync_manager.handle_headers(headers).await;
+            }
+            NetworkMessage::GetBlocks(hashes) => {
+                let _ = self.sync_manager.handle_message(peer.clone(), NetworkMessage::GetBlocks(hashes)).await;
+            }
+            NetworkMessage::Blocks(blocks) => {
+                for blk in blocks {
+                    let _ = self.sync_manager.handle_block_response(Some(blk)).await;
+                }
+            }
+            NetworkMessage::RequestState => {
+                let _ = self.sync_manager.handle_message(peer.clone(), NetworkMessage::RequestState).await;
+            }
+            NetworkMessage::StateSnapshot(data) => {
+                // deserialize and verify
+                if let Ok(state) = bincode::deserialize::<crate::state::state_manager::StateManager>(&data) {
+                    let root = state.get_state_root();
+                    let local_root = self.sync_manager.state.lock().get_state_root();
+                    if root == local_root {
+                        tracing::info!("Received matching state snapshot from peer");
+                    } else {
+                        tracing::warn!("State snapshot root mismatch {} vs {}", hex::encode(root), hex::encode(local_root));
+                    }
                 }
             }
         }

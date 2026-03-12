@@ -20,16 +20,21 @@ anyhow = "1.0"
 thiserror = "1.0"
 async-trait = "0.1"
 parking_lot = "0.12"
+bincode = "1.3"
 libp2p = { version = "0.53", features = ["tcp", "dns", "tokio", "websocket", "noise", "yamux", "floodsub", "kad", "identify", "ping", "mdns", "macros"] }
 futures = "0.3"
 axum = { version = "0.7", features = ["macros"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 reqwest = { version = "0.11", features = ["json"] }
+rayon = "1"
 
 # smart contract dependencies
 wasmtime = "42"
-rocksdb = "0.20"
+rocksdb = { version = "0.20", features = ["snappy", "lz4", "zstd"], default-features = false }
+
+[dev-dependencies]
+wat = "1.0"
 
 [[bin]]
 name = "cytah"
