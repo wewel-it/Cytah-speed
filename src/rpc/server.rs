@@ -48,6 +48,13 @@ pub struct BlockResponse {
     pub block: Option<Block>,
 }
 
+/// Transaction response
+#[derive(Serialize)]
+pub struct TransactionResponse {
+    pub hash: String,
+    pub transaction: Option<Transaction>,
+}
+
 /// DAG info response
 #[derive(Serialize)]
 pub struct DagResponse {
@@ -71,6 +78,7 @@ pub fn create_router(state: RpcState) -> Router {
         .route("/send_tx", post(send_transaction))
         .route("/balance/:address", get(get_balance))
         .route("/block/:hash", get(get_block))
+        .route("/tx/:hash", get(get_transaction))
         .route("/dag", get(get_dag_info))
         .route("/node/info", get(get_node_info))
         .route("/contract/deploy", post(deploy_contract))
@@ -157,6 +165,47 @@ pub async fn get_block(
     Ok(Json(BlockResponse {
         hash: hash_str,
         block,
+    }))
+}
+
+/// GET /tx/{hash} - Get transaction by hash
+pub async fn get_transaction(
+    State(state): State<RpcState>,
+    Path(hash_str): Path<String>,
+) -> Result<Json<TransactionResponse>, StatusCode> {
+    // Parse tx hash
+    let hash_bytes = match hex::decode(&hash_str) {
+        Ok(b) if b.len() == 32 => b,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hash_bytes);
+
+    // First search in mempool
+    let mempool = state.mempool.lock().clone();
+    if let Some(mempool_tx) = mempool.get_transaction(&hash) {
+        return Ok(Json(TransactionResponse {
+            hash: hash_str,
+            transaction: Some(mempool_tx.transaction.clone()),
+        }));
+    }
+
+    // Search in blocks
+    let dag = state.dag.read();
+    for block in dag.get_all_blocks() {
+        for tx in &block.transactions {
+            if tx.hash() == hash {
+                return Ok(Json(TransactionResponse {
+                    hash: hash_str,
+                    transaction: Some(tx.clone()),
+                }));
+            }
+        }
+    }
+
+    Ok(Json(TransactionResponse {
+        hash: hash_str,
+        transaction: None,
     }))
 }
 

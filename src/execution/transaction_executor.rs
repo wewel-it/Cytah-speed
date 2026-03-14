@@ -20,9 +20,17 @@ pub struct TransactionExecutor {
 
 impl TransactionExecutor {
     pub fn new() -> Self {
+        Self::new_with_db_path("./data/contracts.db")
+    }
+
+    pub fn new_with_db_path(db_path: &str) -> Self {
         let state_mgr = StateManager::new();
+        // Use separate RocksDB paths for registry and storage to avoid lock conflicts
+        let registry_db_path = format!("{}-registry", db_path);
+        let storage_db_path = format!("{}-storage", db_path);
         Self {
-            contract_executor: ContractExecutor::new(state_mgr),
+            contract_executor: ContractExecutor::new(state_mgr, &registry_db_path, &storage_db_path)
+                .expect("Failed to initialize contract executor"),
         }
     }
 
@@ -92,8 +100,9 @@ mod tests {
         let from: Address = pubkey_hash[12..32].try_into().unwrap();
         let to: Address = [2; 20];
 
-        let mut executor = TransactionExecutor::new();
-        executor.contract_executor.state_manager.state_tree.update_account(from, crate::state::state_tree::Account::new(1000, 0));
+        let mut executor = TransactionExecutor::new_with_db_path("./data/test_contracts_execute.db");
+        // give enough balance to cover transfer + gas fees
+        executor.contract_executor.state_manager.state_tree.update_account(from, crate::state::state_tree::Account::new(100_000, 0));
 
         let tx = create_signed_transaction(from, to, 100, 0, &secret_key);
         let block = create_test_block(vec![tx]);
@@ -115,7 +124,7 @@ mod tests {
         let from: Address = [1; 20];
         let to: Address = [2; 20];
 
-        let mut executor = TransactionExecutor::new();
+        let mut executor = TransactionExecutor::new_with_db_path("./data/test_contracts_invalid.db");
         executor.contract_executor.state_manager.state_tree.update_account(from, crate::state::state_tree::Account::new(50, 0));
 
         let tx = create_signed_transaction(from, to, 100, 0, &secret_key); // Insufficient balance
@@ -139,8 +148,9 @@ mod tests {
         let from: Address = pubkey_hash[12..32].try_into().unwrap();
         let to: Address = [2; 20];
 
-        let mut executor = TransactionExecutor::new();
-        executor.contract_executor.state_manager.state_tree.update_account(from, crate::state::state_tree::Account::new(1000, 0));
+        let mut executor = TransactionExecutor::new_with_db_path("./data/test_contracts_multiple.db");
+        // provide enough funds for multiple transfers + gas
+        executor.contract_executor.state_manager.state_tree.update_account(from, crate::state::state_tree::Account::new(200_000, 0));
 
         let tx1 = create_signed_transaction(from, to, 100, 0, &secret_key);
         let tx2 = create_signed_transaction(from, to, 100, 1, &secret_key);

@@ -20,9 +20,9 @@ pub enum NetworkMessage {
     /// exclusive as agreed by protocol).  The `max` field limits how many
     /// headers the peer should return.
     GetHeaders { from: BlockHash, max: usize },
-    /// Reply to `GetHeaders` with a sequence of block headers.  The headers
-    /// may be truncated if the peer does not have more.
-    Headers(Vec<BlockHeader>),
+    /// Reply to `GetHeaders` with a sequence of (block hash, header) pairs.
+    /// Including the block hash enables the receiver to request the full blocks.
+    Headers(Vec<(BlockHash, BlockHeader)>),
 
     /// Request full blocks by hash list.
     GetBlocks(Vec<BlockHash>),

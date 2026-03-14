@@ -130,7 +130,7 @@ impl TxDagMempool {
         }
 
         // Sign harus ada
-        if tx.signature.is_empty() {
+        if tx.signature.data.is_empty() {
             return Err("Transaction must be signed before adding to mempool".to_string());
         }
 
@@ -283,6 +283,11 @@ impl TxDagMempool {
         self.transactions.read().values().cloned().collect()
     }
 
+    /// Get a specific transaction by hash (if present), typically used by RPC.
+    pub fn get_transaction(&self, hash: &[u8; 32]) -> Option<MempoolTransaction> {
+        self.transactions.read().get(hash).cloned()
+    }
+
     /// Dapatkan jumlah transaksi di mempool
     pub fn size(&self) -> usize {
         self.transactions.read().len()
@@ -313,15 +318,17 @@ impl TxDagMempool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secp256k1::SecretKey;
+    use secp256k1::{Secp256k1, SecretKey};
+    use sha2::{Sha256, Digest};
 
-    fn create_test_transaction(from: Address, to: Address, amount: u64, nonce: u64) -> Transaction {
+    fn create_test_transaction(to: Address, amount: u64, nonce: u64, secret_key: &SecretKey) -> Transaction {
+        let secp = Secp256k1::new();
+        let pubkey = secret_key.public_key(&secp);
+        let pubkey_hash = Sha256::digest(&pubkey.serialize()[1..]);
+        let from: Address = pubkey_hash[12..32].try_into().unwrap();
+
         let mut tx = Transaction::new(from, to, amount, nonce, 21000, 1);
-        
-        // Sign transaction
-        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
-        tx.sign(&secret_key).ok();
-        
+        tx.sign(secret_key).unwrap();
         tx
     }
 
@@ -335,15 +342,20 @@ mod tests {
     #[test]
     fn test_add_transaction() {
         let state = Arc::new(Mutex::new(StateManager::new()));
-        // fund the account so balance isn't zero
-        state.lock().apply_transaction(&create_test_transaction([9u8;20],[1u8;20],0,0)).ok();
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let secp = Secp256k1::new();
+        let pubkey = secret_key.public_key(&secp);
+        let pubkey_hash = Sha256::digest(&pubkey.serialize()[1..]);
+        let from: Address = pubkey_hash[12..32].try_into().unwrap();
+
+        // fund the derived sender account so balance isn't zero
+        state.lock().state_tree.update_account(from, crate::state::state_tree::Account::new(1000, 0));
         let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
-        let from = [1u8; 20];
         let to = [2u8; 20];
-        
-        let tx = create_test_transaction(from, to, 100, 0);
+
+        let tx = create_test_transaction(to, 100, 0, &secret_key);
         let result = mempool.add_transaction(tx, vec![], Some("peer1".to_string()));
-        
+
         assert!(result.is_ok());
         assert_eq!(mempool.size(), 1);
     }
@@ -351,26 +363,40 @@ mod tests {
     #[test]
     fn test_validate_transaction() {
         let state = Arc::new(Mutex::new(StateManager::new()));
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let secp = Secp256k1::new();
+        let pubkey = secret_key.public_key(&secp);
+        let pubkey_hash = Sha256::digest(&pubkey.serialize()[1..]);
+        let from: Address = pubkey_hash[12..32].try_into().unwrap();
+
+        // fund the derived sender account so balance isn't zero
+        state.lock().state_tree.update_account(from, crate::state::state_tree::Account::new(1000, 0));
         let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
-        let from = [1u8; 20];
         let to = [2u8; 20];
-        
-        let tx = create_test_transaction(from, to, 100, 0);
+
+        let tx = create_test_transaction(to, 100, 0, &secret_key);
         let result = mempool.validate_transaction(&tx);
-        
+
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_get_ready_transactions() {
         let state = Arc::new(Mutex::new(StateManager::new()));
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let secp = Secp256k1::new();
+        let pubkey = secret_key.public_key(&secp);
+        let pubkey_hash = Sha256::digest(&pubkey.serialize()[1..]);
+        let from: Address = pubkey_hash[12..32].try_into().unwrap();
+
+        // fund the derived sender account so balance isn't zero
+        state.lock().state_tree.update_account(from, crate::state::state_tree::Account::new(1000, 0));
         let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
-        let from = [1u8; 20];
         let to = [2u8; 20];
-        
-        let tx = create_test_transaction(from, to, 100, 0);
+
+        let tx = create_test_transaction(to, 100, 0, &secret_key);
         mempool.add_transaction(tx, vec![], Some("peer2".to_string())).unwrap();
-        
+
         let ready = mempool.get_ready_transactions();
         assert_eq!(ready.len(), 1);
         assert!(ready[0].is_ready);
@@ -379,18 +405,25 @@ mod tests {
     #[test]
     fn test_remove_transaction() {
         let state = Arc::new(Mutex::new(StateManager::new()));
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let secp = Secp256k1::new();
+        let pubkey = secret_key.public_key(&secp);
+        let pubkey_hash = Sha256::digest(&pubkey.serialize()[1..]);
+        let from: Address = pubkey_hash[12..32].try_into().unwrap();
+
+        // fund the derived sender account so balance isn't zero
+        state.lock().state_tree.update_account(from, crate::state::state_tree::Account::new(1000, 0));
         let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
-        let from = [1u8; 20];
         let to = [2u8; 20];
-        
-        let tx = create_test_transaction(from, to, 100, 0);
+
+        let tx = create_test_transaction(to, 100, 0, &secret_key);
         mempool.add_transaction(tx.clone(), vec![], Some("src".to_string())).unwrap();
         assert_eq!(mempool.size(), 1);
-        
+
         let tx_hash_vec = tx.hash();
         let tx_hash: [u8; 32] = tx_hash_vec.try_into().unwrap();
         mempool.remove_transaction(&tx_hash);
-        
+
         assert_eq!(mempool.size(), 0);
     }
 
@@ -399,22 +432,28 @@ mod tests {
     fn test_reject_zero_balance() {
         let state = Arc::new(Mutex::new(StateManager::new()));
         let mempool = TxDagMempool::new(10, state.clone(), DEFAULT_MIN_GAS_PRICE);
-        let from = [1u8; 20];
         let to = [2u8; 20];
-        let tx = create_test_transaction(from, to, 50, 0);
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let tx = create_test_transaction(to, 50, 0, &secret_key);
         let res = mempool.add_transaction(tx, vec![], Some("peer3".to_string()));
         assert!(res.is_err());
     }
 
+
     #[test]
     fn test_reject_low_gas_price() {
         let state = Arc::new(Mutex::new(StateManager::new()));
-        // fund account
-        state.lock().apply_transaction(&create_test_transaction([9u8;20],[1u8;20],0,0)).ok();
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let secp = Secp256k1::new();
+        let pubkey = secret_key.public_key(&secp);
+        let pubkey_hash = Sha256::digest(&pubkey.serialize()[1..]);
+        let from: Address = pubkey_hash[12..32].try_into().unwrap();
+
+        // fund the derived sender account so balance isn't zero
+        state.lock().state_tree.update_account(from, crate::state::state_tree::Account::new(1000, 0));
         let mempool = TxDagMempool::new(10, state.clone(), 100);
-        let from = [1u8; 20];
         let to = [2u8; 20];
-        let mut tx = create_test_transaction(from, to, 10, 0);
+        let mut tx = create_test_transaction(to, 10, 0, &secret_key);
         tx.gas_price = 50; // below min 100
         let res = mempool.add_transaction(tx, vec![], Some("peer4".to_string()));
         assert!(res.is_err());
@@ -423,15 +462,21 @@ mod tests {
     #[test]
     fn test_rate_limit() {
         let state = Arc::new(Mutex::new(StateManager::new()));
-        state.lock().apply_transaction(&create_test_transaction([9u8;20],[1u8;20],0,0)).ok();
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let secp = Secp256k1::new();
+        let pubkey = secret_key.public_key(&secp);
+        let pubkey_hash = Sha256::digest(&pubkey.serialize()[1..]);
+        let from: Address = pubkey_hash[12..32].try_into().unwrap();
+
+        // fund the derived sender account so it has non-zero balance
+        state.lock().state_tree.update_account(from, crate::state::state_tree::Account::new(1000, 0));
         let mempool = TxDagMempool::new(1000, state.clone(), DEFAULT_MIN_GAS_PRICE);
-        let from = [1u8; 20];
         let to = [2u8; 20];
         for _ in 0..MAX_TX_PER_SOURCE {
-            let tx = create_test_transaction(from, to, 1, 0);
+            let tx = create_test_transaction(to, 1, 0, &secret_key);
             let _ = mempool.add_transaction(tx, vec![], Some("peer5".to_string()));
         }
-        let tx = create_test_transaction(from, to, 1, 1);
+        let tx = create_test_transaction(to, 1, 1, &secret_key);
         let res = mempool.add_transaction(tx, vec![], Some("peer5".to_string()));
         assert!(res.is_err());
     }
@@ -439,14 +484,20 @@ mod tests {
     #[test]
     fn test_drop_low_fee_when_full() {
         let state = Arc::new(Mutex::new(StateManager::new()));
-        state.lock().apply_transaction(&create_test_transaction([9u8;20],[1u8;20],0,0)).ok();
+        let secret_key = SecretKey::from_slice(&[1; 32]).unwrap();
+        let secp = Secp256k1::new();
+        let pubkey = secret_key.public_key(&secp);
+        let pubkey_hash = Sha256::digest(&pubkey.serialize()[1..]);
+        let from: Address = pubkey_hash[12..32].try_into().unwrap();
+
+        // fund the derived sender account so it can add transactions
+        state.lock().state_tree.update_account(from, crate::state::state_tree::Account::new(1000, 0));
         let mempool = TxDagMempool::new(1, state.clone(), DEFAULT_MIN_GAS_PRICE);
-        let from = [1u8; 20];
         let to = [2u8; 20];
-        let mut tx1 = create_test_transaction(from, to, 1, 0);
+        let mut tx1 = create_test_transaction(to, 1, 0, &secret_key);
         tx1.gas_price = 10;
         mempool.add_transaction(tx1.clone(), vec![], Some("peer6".to_string())).unwrap();
-        let mut tx2 = create_test_transaction(from, to, 1, 1);
+        let mut tx2 = create_test_transaction(to, 1, 1, &secret_key);
         tx2.gas_price = 20;
         // should drop tx1 and accept tx2
         mempool.add_transaction(tx2.clone(), vec![], Some("peer6".to_string())).unwrap();

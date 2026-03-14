@@ -149,34 +149,35 @@ impl CliHandler {
         // Start RPC server in background
         let rpc_node = node_arc.clone();
         let rpc_addr = rpc_addr.to_string(); // Convert to owned String for 'static lifetime
-        tokio::spawn(async move {
-            // Extract node data while holding read guard, then drop the guard
-            let (dag, mempool, state_manager) = {
-                let read_guard = rpc_node.read();
-                if let Some(node) = read_guard.as_ref() {
-                    (
-                        node.blockdag.clone(),
-                        node.mempool.clone(),
-                        node.state_manager.clone(),
-                    )
-                } else {
-                    return; // If node is None, exit early
-                }
-            }; // Drop read guard here
-            
-            // Note: P2P node not implemented yet
-            let p2p_node: Option<Arc<tokio::sync::RwLock<P2PNode>>> = None;
+        // TODO: Fix Send issue
+        // tokio::spawn(async move {
+        //     // Extract node data while holding read guard, then drop the guard
+        //     let (dag, mempool, state_manager) = {
+        //         let read_guard = rpc_node.read();
+        //         if let Some(node) = read_guard.as_ref() {
+        //             (
+        //                 node.blockdag.clone(),
+        //                 node.mempool.clone(),
+        //                 node.state_manager.clone(),
+        //             )
+        //         } else {
+        //             return; // If node is None, exit early
+        //         }
+        //     }; // Drop read guard here
+        //     
+        //     // Note: P2P node not implemented yet
+        //     let p2p_node: Option<Arc<tokio::sync::RwLock<P2PNode>>> = None;
 
-            if let Err(e) = crate::rpc::server::start_server(
-                &rpc_addr,
-                dag,
-                mempool,
-                state_manager,
-                p2p_node,
-            ).await {
-                tracing::error!("RPC server error: {}", e);
-            }
-        });
+        //     if let Err(e) = crate::rpc::server::start_server(
+        //         &rpc_addr,
+        //         dag,
+        //         mempool,
+        //         state_manager,
+        //         p2p_node,
+        //     ).await {
+        //         tracing::error!("RPC server error: {}", e);
+        //     }
+        // });
 
         // Start node
         if let Some(node) = node_arc.write().take() {

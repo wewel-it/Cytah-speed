@@ -17,13 +17,18 @@ pub struct ContractExecutor {
 }
 
 impl ContractExecutor {
-    pub fn new(state_manager: StateManager) -> Self {
-        Self {
-            registry: ContractRegistry::new(),
-            storage: ContractStorage::new("contract_storage"),
+    /// Create a new executor with a path to a persistent contract registry.
+    pub fn new(
+        state_manager: StateManager,
+        contract_registry_path: &str,
+        contract_storage_path: &str,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            registry: ContractRegistry::new(contract_registry_path)?,
+            storage: ContractStorage::new(contract_storage_path),
             runtime: WasmRuntime::new(),
             state_manager,
-        }
+        })
     }
 
     /// Handle a transaction of any supported type.
@@ -122,8 +127,17 @@ mod tests {
     use crate::core::transaction::{Transaction, Address};
     use secp256k1::{Secp256k1, SecretKey};
     use rand::{Rng, thread_rng};
+    use sha2::Digest;
 
-    fn create_signed_tx(from: Address, to: Address, amount: u64, nonce: u64, gas_limit: u64, gas_price: u64, privk: &SecretKey) -> Transaction {
+    fn create_signed_tx(
+        from: Address,
+        to: Address,
+        amount: u64,
+        nonce: u64,
+        gas_limit: u64,
+        gas_price: u64,
+        privk: &SecretKey,
+    ) -> Transaction {
         let mut tx = Transaction::new_transfer(from, to, amount, nonce, gas_limit, gas_price);
         tx.sign(privk).unwrap();
         tx
@@ -139,17 +153,22 @@ mod tests {
         let pubk = privk.public_key(&secp);
         let pubhash = sha2::Sha256::digest(&pubk.serialize()[1..]);
         let from: Address = pubhash[12..32].try_into().unwrap();
-        let to: Address = [2;20];
+        let to: Address = [2; 20];
 
-        let mut executor = ContractExecutor::new(StateManager::new());
-        executor.state_manager.state_tree.update_account(from, crate::state::state_tree::Account::new(10000,0));
+        // Use separate DB paths for registry and storage to avoid conflicts during tests
+        let registry_path = "./data/test_contracts_executor_registry.db";
+        let storage_path = "./data/test_contracts_executor_storage.db";
+        let mut executor = ContractExecutor::new(StateManager::new(), registry_path, storage_path)
+            .expect("Should create executor");
+        // Ensure sender has enough balance to cover transfer + gas
+        executor.state_manager.state_tree.update_account(from, crate::state::state_tree::Account::new(100000, 0));
 
         let tx = create_signed_tx(from, to, 100, 0, 21000, 1, &privk);
         let used = executor.execute_transaction(&tx).expect("tx should succeed");
         assert_eq!(used, 21000);
         // fee = 21000*1
         let sender_acc = executor.state_manager.get_account(&from).unwrap();
-        assert_eq!(sender_acc.balance, 10000 - 100 - 21000);
+        assert_eq!(sender_acc.balance, 100000 - 100 - 21000);
         let recv_acc = executor.state_manager.get_account(&to).unwrap();
         assert_eq!(recv_acc.balance, 100);
     }

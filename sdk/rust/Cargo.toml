@@ -1,0 +1,35 @@
+[package]
+name = "cytah-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Cytah-Speed Developer SDK"
+license = "MIT"
+
+[lib]
+name = "cytah_sdk"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+secp256k1 = { version = "0.28", features = ["recovery", "rand", "serde", "global-context"] }
+rand = "0.8"
+tokio = { version = "1.36", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+thiserror = "1.0"
+async-trait = "0.1"
+futures = "0.3"
+hex = "0.4"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = "0.4"
+bincode = "1.3"
+url = "2.4"
+tokio-tungstenite = "0.20"
+# Path dependency to the core crate for types
+cytah-speed = { path = "../../" }
+
+# Additional dependencies for SDK
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -79,6 +79,72 @@ impl GHOSTDAGEngine {
         Ok(blue_count)
     }
 
+    /// Annotate a block with GhostDAG-derived metadata such as blue score and chain height.
+    /// This is used to ensure blocks carry deterministic ordering metadata before being inserted into the DAG.
+    pub fn annotate_block(
+        &mut self,
+        dag: &BlockDAG,
+        block: &mut crate::Block,
+    ) -> Result<(), String> {
+        let selected_parent = if block.header.parent_hashes.is_empty() {
+            None
+        } else {
+            Some(self.select_parent_from_parents(dag, &block.header.parent_hashes)?)
+        };
+
+        let chain_height = if let Some(parent) = selected_parent {
+            dag.get_block_height(&parent).unwrap_or(0).saturating_add(1)
+        } else {
+            0
+        };
+
+        let blue_score = self.calculate_blue_score_for_new_block(dag, block)?;
+        let topo_index = dag.block_count() as u64;
+
+        block.set_consensus_metadata(selected_parent, blue_score, chain_height, topo_index);
+
+        Ok(())
+    }
+
+    /// Select best parent from a list of candidate parents using blue score and deterministic tie-breakers.
+    pub fn select_parent_from_parents(
+        &mut self,
+        dag: &BlockDAG,
+        parents: &[BlockHash],
+    ) -> Result<BlockHash, String> {
+        if parents.is_empty() {
+            return Err("No parent candidates provided".to_string());
+        }
+
+        let mut best_parent = parents[0];
+        let mut best_score = self.get_blue_score(&best_parent).unwrap_or(0);
+
+        for parent in parents.iter().skip(1) {
+            let score = self.get_blue_score(parent).unwrap_or(0);
+            if score > best_score || (score == best_score && parent < &best_parent) {
+                best_parent = *parent;
+                best_score = score;
+            }
+        }
+
+        Ok(best_parent)
+    }
+
+    /// Calculate blue score for a block that is not yet inserted into the DAG.
+    fn calculate_blue_score_for_new_block(
+        &mut self,
+        dag: &BlockDAG,
+        block: &crate::Block,
+    ) -> Result<u64, String> {
+        // Basic heuristic: blue score = max parent blue score + 1
+        let mut max_parent_score = 0u64;
+        for parent_hash in &block.header.parent_hashes {
+            let score = self.get_blue_score(parent_hash).unwrap_or(0);
+            max_parent_score = max_parent_score.max(score);
+        }
+        Ok(max_parent_score.saturating_add(1))
+    }
+
     /// Calculate blue score of a block
     /// Blue score = number of blue ancestors + 1
     pub fn calculate_blue_score(&mut self, hash: &BlockHash) -> Result<u64, String> {

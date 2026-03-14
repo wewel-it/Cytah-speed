@@ -44,10 +44,6 @@ impl PeerManager {
             return Err("Maximum peers reached".to_string());
         }
 
-        if peers.contains_key(&peer_id) {
-            return Err("Peer already exists".to_string());
-        }
-
         // reject if peer is currently banned
         let now = chrono::Utc::now().timestamp() as u64;
         if let Some(exp) = self.bans.read().get(&peer_id) {
@@ -58,10 +54,24 @@ impl PeerManager {
                 self.bans.write().remove(&peer_id);
             }
         }
+
+        // If the peer exists but is disconnected, allow re-adding (e.g. after ban expiration)
+        if let Some(existing) = peers.get_mut(&peer_id) {
+            if existing.is_connected {
+                return Err("Peer already exists".to_string());
+            }
+            existing.address = address;
+            existing.last_seen = now;
+            existing.is_connected = true;
+            existing.dag_height = 0;
+            existing.score = 100;
+            return Ok(());
+        }
+
         let peer_info = PeerInfo {
             peer_id: peer_id.clone(),
             address,
-            last_seen: chrono::Utc::now().timestamp() as u64,
+            last_seen: now,
             is_connected: false,
             dag_height: 0,
             score: 100,

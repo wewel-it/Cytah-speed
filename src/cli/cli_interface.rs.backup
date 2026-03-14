@@ -1,0 +1,483 @@
+use std::sync::Arc;
+use parking_lot::RwLock;
+use tokio::time::{Duration, Instant};
+
+use crate::node::{NodeRuntime, PeerInfo, SystemMetrics};
+use crate::core::Transaction;
+use secp256k1::SecretKey;
+
+/// Production-grade CLI interface untuk node dengan fitur advanced
+/// Sesuai ARCHITECTURE_UPGRADE.md: menambahkan mining control, peer management,
+/// metrics, storage pruning, dan security validation.
+pub struct CLIInterface {
+    node: Arc<RwLock<Option<NodeRuntime>>>,
+    mining_active: Arc<RwLock<bool>>,
+    metrics: Arc<RwLock<CLIMetrics>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CLIMetrics {
+    pub start_time: Instant,
+    pub transactions_processed: u64,
+    pub blocks_mined: u64,
+    pub avg_latency_ms: f64,
+}
+
+impl CLIMetrics {
+    pub fn new() -> Self {
+        Self {
+            start_time: Instant::now(),
+            transactions_processed: 0,
+            blocks_mined: 0,
+            avg_latency_ms: 0.0,
+        }
+    }
+
+    pub fn uptime_seconds(&self) -> u64 {
+        self.start_time.elapsed().as_secs()
+    }
+}
+
+impl CLIInterface {
+    pub fn new() -> Self {
+        Self {
+            node: Arc::new(RwLock::new(None)),
+            mining_active: Arc::new(RwLock::new(false)),
+            metrics: Arc::new(RwLock::new(CLIMetrics::new())),
+        }
+    }
+
+    /// Jalankan CLI
+    pub async fn run(&self) -> Result<(), String> {
+        println!("=== Cytah-Speed Production CLI ===");
+        println!("Node uptime: {} seconds", self.metrics.read().uptime_seconds());
+        println!("Transactions processed: {}", self.metrics.read().transactions_processed);
+        println!("Blocks mined: {}", self.metrics.read().blocks_mined);
+        println!();
+
+        loop {
+            self.display_menu();
+            print!("Pilih opsi (1-14 atau q untuk quit): ");
+            use std::io::{self, Write};
+            io::stdout().flush().ok();
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).ok();
+            let choice = input.trim();
+
+            match choice {
+                "1" => self.cmd_start_node().await?,
+                "2" => self.cmd_send_transaction().await?,
+                "3" => self.cmd_print_dag()?,
+                "4" => self.cmd_print_state()?,
+                "5" => self.cmd_print_finality()?,
+                "6" => self.cmd_print_mempool()?,
+                "7" => self.cmd_connect_peer().await?,
+                "8" => self.cmd_print_peers()?,
+                "9" => self.cmd_start_mining().await?,
+                "10" => self.cmd_stop_mining().await?,
+                "11" => self.cmd_list_peers().await?,
+                "12" => self.cmd_show_metrics().await?,
+                "13" => self.cmd_prune_storage().await?,
+                "14" => self.cmd_validate_transaction().await?,
+                "q" | "Q" => {
+                    println!("Keluar dari CLI...");
+                    break;
+                }
+                _ => println!("Opsi tidak valid. Coba lagi."),
+            }
+            println!();
+        }
+
+        Ok(())
+    }
+
+    fn display_menu(&self) {
+        println!("=== Menu CLI ===");
+        println!("1. Start Node");
+        println!("2. Send Transaction");
+        println!("3. Print DAG");
+        println!("4. Print State");
+        println!("5. Print Finality");
+        println!("6. Print Mempool");
+        println!("7. Connect Peer");
+        println!("8. Print Peers");
+        println!("9. Start Mining");
+        println!("10. Stop Mining");
+        println!("11. List Peers (Advanced)");
+        println!("12. Show Metrics");
+        println!("13. Prune Storage");
+        println!("14. Validate Transaction");
+        println!("q. Quit");
+        println!("=================");
+    }
+
+    /// Start node
+    async fn cmd_start_node(&self) -> Result<(), String> {
+        println!("\n--- Starting Node ---");
+
+        // Create node asynchronously with default config
+        let node = NodeRuntime::new().await.map_err(|e| e.to_string())?;
+        node.initialize().await.map_err(|e| e.to_string())?;
+
+        *self.node.write() = Some(node);
+
+        println!("✓ Node started");
+        println!("Node initialized and ready to accept transactions");
+
+        Ok(())
+    }
+
+    /// Send transaction
+    async fn cmd_send_transaction(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Send Transaction ---");
+
+        print!("From address (hex, 40 chars): ");
+        use std::io::{self, Write};
+        io::stdout().flush().ok();
+
+        let mut from_str = String::new();
+        io::stdin().read_line(&mut from_str).ok();
+        let from_str = from_str.trim();
+
+        let from: [u8; 20] = hex::decode(from_str)
+            .ok()
+            .and_then(|v| v.try_into().ok())
+            .ok_or("Invalid from address")?;
+
+        print!("To address (hex, 40 chars): ");
+        io::stdout().flush().ok();
+
+        let mut to_str = String::new();
+        io::stdin().read_line(&mut to_str).ok();
+        let to_str = to_str.trim();
+
+        let to: [u8; 20] = hex::decode(to_str)
+            .ok()
+            .and_then(|v| v.try_into().ok())
+            .ok_or("Invalid to address")?;
+
+        print!("Amount: ");
+        io::stdout().flush().ok();
+
+        let mut amount_str = String::new();
+        io::stdin().read_line(&mut amount_str).ok();
+        let amount: u64 = amount_str.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+
+        print!("Nonce: ");
+        io::stdout().flush().ok();
+
+        let mut nonce_str = String::new();
+        io::stdin().read_line(&mut nonce_str).ok();
+        let nonce: u64 = nonce_str.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())?;
+
+        // Create and sign transaction
+        let mut tx = Transaction::new_transfer(from, to, amount, nonce, 21000, 1);
+
+        // Sign dengan test key
+        let secret_key = SecretKey::from_slice(&[1; 32])
+            .map_err(|_| "Failed to create secret key")?;
+        tx.sign(&secret_key)?;
+
+        // Add ke node
+        node.add_transaction(tx).await?;
+
+        println!("✓ Transaction sent");
+        println!("Mempool size: {}", node.get_mempool_size());
+
+        Ok(())
+    }
+
+    /// Print DAG status
+    fn cmd_print_dag(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- DAG Status ---");
+
+        let tips = node.get_tips();
+        println!("Tips: {}", tips.len());
+        for (i, tip) in tips.iter().enumerate() {
+            println!("  [{}] {}", i, hex::encode(&tip[..8]));
+        }
+
+        let dag = node.blockdag.read();
+        let all_blocks = dag.get_all_blocks();
+        println!("Total blocks: {}", all_blocks.len());
+
+        Ok(())
+    }
+
+    /// Print state
+    fn cmd_print_state(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- State Status ---");
+
+        let state_root = node.get_state_root();
+        println!("Current state root: {}", hex::encode(state_root));
+        println!("State management active");
+
+        Ok(())
+    }
+
+    /// Print finality
+    fn cmd_print_finality(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Finality Status ---");
+
+        match node.get_finality_height() {
+            Some(height) => println!("Finalization height: {}", height),
+            None => println!("No finalized blocks yet"),
+        }
+
+        println!("Confirmation depth: {}", node.finality_engine.confirmation_depth);
+
+        Ok(())
+    }
+
+    /// Print mempool
+    fn cmd_print_mempool(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Mempool Status ---");
+
+        let size = node.get_mempool_size();
+        println!("Mempool size: {}", size);
+
+        let txs = (*node.mempool).get_all_transactions();
+        println!("Transactions:");
+        for (i, tx) in txs.iter().take(10).enumerate() {
+            println!(
+                "  [{}] {} tokens, nonce={}",
+                i,
+                match &tx.transaction.payload {
+                    crate::core::transaction::TxPayload::Transfer { amount, .. } => *amount,
+                    _ => 0,
+                },
+                tx.transaction.nonce
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Connect to peer
+    async fn cmd_connect_peer(&self) -> Result<(), String> {
+        let _node = self.node.read();
+        let _node = _node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Connect Peer ---");
+
+        print!("Peer address (IP:PORT): ");
+        use std::io::{self, Write};
+        io::stdout().flush().ok();
+
+        let mut peer_addr = String::new();
+        io::stdin().read_line(&mut peer_addr).ok();
+        let peer_addr = peer_addr.trim().to_string();
+
+        // Network connectivity would be handled through P2PNode
+        println!("✓ Peer address to be connected: {}", peer_addr);
+        println!("Note: P2P network connectivity is managed separately through P2PNode");
+
+        Ok(())
+    }
+
+    /// Print peers (basic)
+    fn cmd_print_peers(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Connected Peers ---");
+
+        // Get peer count from network
+        let peer_count = node.get_peer_count();
+        println!("Connected peers: {}", peer_count);
+
+        println!("Note: Detailed peer information available through advanced P2P management");
+
+        Ok(())
+    }
+
+    /// Start mining
+    async fn cmd_start_mining(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Start Mining ---");
+
+        if *self.mining_active.read() {
+            println!("Mining already active");
+            return Ok(());
+        }
+
+        // Start mining process
+        node.start_mining().await.map_err(|e| e.to_string())?;
+        *self.mining_active.write() = true;
+
+        println!("✓ Mining started successfully");
+        println!("Node will now participate in block production");
+
+        Ok(())
+    }
+
+    /// Stop mining
+    async fn cmd_stop_mining(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Stop Mining ---");
+
+        if !*self.mining_active.read() {
+            println!("Mining not active");
+            return Ok(());
+        }
+
+        // Stop mining process
+        node.stop_mining().await.map_err(|e| e.to_string())?;
+        *self.mining_active.write() = false;
+
+        println!("✓ Mining stopped successfully");
+
+        Ok(())
+    }
+
+    /// List peers (advanced)
+    async fn cmd_list_peers(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Advanced Peer List ---");
+
+        // Get detailed peer information
+        let peers = node.get_detailed_peers().await.map_err(|e| e.to_string())?;
+
+        println!("Connected peers: {}", peers.len());
+        for (i, peer) in peers.iter().enumerate() {
+            println!("  [{}] ID: {}, Address: {}, Status: {}",
+                    i + 1,
+                    peer.id,
+                    peer.address,
+                    peer.status);
+        }
+
+        if peers.is_empty() {
+            println!("No peers connected. Use 'connect-peer' to add peers.");
+        }
+
+        Ok(())
+    }
+
+    /// Show metrics
+    async fn cmd_show_metrics(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- System Metrics ---");
+
+        let metrics = self.metrics.read();
+        println!("Uptime: {} seconds", metrics.uptime_seconds());
+        println!("Transactions processed: {}", metrics.transactions_processed);
+        println!("Blocks mined: {}", metrics.blocks_mined);
+        println!("Average latency: {:.2} ms", metrics.avg_latency_ms);
+
+        // Get additional metrics from node
+        let node_metrics = node.get_metrics().await.map_err(|e| e.to_string())?;
+        println!("TPS (last 1min): {:.2}", node_metrics.tps);
+        println!("Network latency: {:.2} ms", node_metrics.network_latency_ms);
+        println!("Memory usage: {} MB", node_metrics.memory_mb);
+        println!("Storage size: {} MB", node_metrics.storage_mb);
+
+        Ok(())
+    }
+
+    /// Prune storage
+    async fn cmd_prune_storage(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Prune Storage ---");
+
+        print!("Enter pruning window (blocks to keep, default 1000): ");
+        use std::io::{self, Write};
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).ok();
+        let window: usize = input.trim().parse().unwrap_or(1000);
+
+        // Trigger storage pruning
+        let pruned_blocks = node.prune_storage(window).await.map_err(|e| e.to_string())?;
+
+        println!("✓ Storage pruned successfully");
+        println!("Removed {} old blocks", pruned_blocks);
+        println!("Storage optimized for performance");
+
+        Ok(())
+    }
+
+    /// Validate transaction
+    async fn cmd_validate_transaction(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Validate Transaction ---");
+
+        print!("Enter transaction hash (hex): ");
+        use std::io::{self, Write};
+        io::stdout().flush().ok();
+
+        let mut hash_input = String::new();
+        io::stdin().read_line(&mut hash_input).ok();
+        let hash_str = hash_input.trim();
+
+        // Parse hash
+        let hash = hex::decode(hash_str).map_err(|_| "Invalid hex hash")?;
+        if hash.len() != 32 {
+            return Err("Hash must be 32 bytes".to_string());
+        }
+
+        // Validate transaction
+        let is_valid = node.validate_transaction(&hash).await.map_err(|e| e.to_string())?;
+
+        if is_valid {
+            println!("✓ Transaction is valid");
+            println!("Hash: {}", hash_str);
+        } else {
+            println!("✗ Transaction is invalid or not found");
+            println!("Hash: {}", hash_str);
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_cli_creation() {
+        let cli = CLIInterface::new();
+        let node = cli.node.read();
+        assert!(node.is_none());
+    }
+
+    #[test]
+    fn test_address_parsing() {
+        let addr_str = "0102030405060708090a0b0c0d0e0f1011121314";
+        let addr: [u8; 20] = hex::decode(addr_str)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(addr.len(), 20);
+    }
+}

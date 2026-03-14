@@ -62,7 +62,9 @@ impl Wallet {
     /// Sign a transaction message
     pub fn sign_message(&self, message: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let secp = Secp256k1::new();
-        let message = Message::from_digest_slice(message)?;
+        // Hash message to 32 bytes before signing
+        let digest = Sha256::digest(message);
+        let message = Message::from_digest_slice(&digest)?;
         let sig = secp.sign_ecdsa_recoverable(&message, &self.private_key);
         let (recovery_id, sig_bytes) = sig.serialize_compact();
         let mut signature = sig_bytes.to_vec();
@@ -73,7 +75,8 @@ impl Wallet {
     /// Verify a signature
     pub fn verify_signature(&self, message: &[u8], signature: &[u8]) -> Result<bool, Box<dyn std::error::Error>> {
         let secp = Secp256k1::new();
-        let message = Message::from_digest_slice(message)?;
+        let digest = Sha256::digest(message);
+        let message = Message::from_digest_slice(&digest)?;
         let recovery_id = secp256k1::ecdsa::RecoveryId::from_i32(signature[64] as i32)?;
         let sig = secp256k1::ecdsa::RecoverableSignature::from_compact(&signature[0..64], recovery_id)?;
         let recovered_pubkey = secp.recover_ecdsa(&message, &sig)?;

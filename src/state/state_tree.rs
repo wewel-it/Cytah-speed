@@ -98,6 +98,16 @@ impl SparseMerkleTree {
         }
     }
 
+    /// Iterate over all accounts in the tree
+    pub fn iter_accounts<F>(&self, mut f: F)
+    where
+        F: FnMut(&Address, &Account),
+    {
+        for (address, account) in &self.leaves {
+            f(address, account);
+        }
+    }
+
     fn rebuild_tree(&mut self) {
         if self.leaves.is_empty() {
             self.root = None;

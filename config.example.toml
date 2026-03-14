@@ -1,0 +1,231 @@
+# Cytah-Speed Node Configuration
+# Copy this file to config.toml and customize for your node
+
+# ============================================================================
+# NETWORK SETTINGS
+# ============================================================================
+[network]
+# Network listen address for P2P protocol
+listen_addr = "/ip4/0.0.0.0/tcp/30333"
+
+# RPC server listen address (HTTP)
+rpc_addr = "127.0.0.1:8080"
+
+# Enable mDNS-based peer discovery (useful for local testing)
+# Set to false if running behind strict NAT or firewall
+enable_mdns = true
+
+# Enable DHT-style peer discovery (experimental, requires future implementation)
+enable_dht = false
+
+# Bootstrap peers for initial network connectivity
+# Format: /ip4/{ip}/tcp/{port}/p2p/{peer_id}
+# These are well-known seed nodes that help new nodes join the network
+bootstrap_peers = [
+    "/ip4/seed1.cytah.example.com/tcp/30333/p2p/QmBootstrap1",
+    "/ip4/seed2.cytah.example.com/tcp/30333/p2p/QmBootstrap2",
+]
+
+# Maximum number of connected peers
+max_peers = 100
+
+# Peer scoring configuration
+[network.peer_scoring]
+# Initial reputation score for new peers
+initial_score = 100
+
+# Penalize peer by this amount for misbehavior
+penalty_per_bad_action = 10
+
+# Ban peer if score falls below this threshold
+ban_threshold = 0
+
+# ============================================================================
+# SYNCHRONIZATION SETTINGS
+# ============================================================================
+[sync]
+# Periodic check interval for missing blocks (in seconds)
+# Node will query peers for blocks we don't have
+periodic_check_interval = 60
+
+# Maximum number of pending block requests at once
+max_pending_requests = 1000
+
+# Timeout for block requests (in seconds)
+block_request_timeout = 30
+
+# Maximum number of blocks to request in a single batch
+max_batch_size = 100
+
+# Fast state sync settings
+[sync.state]
+# Enable fast state synchronization for lagging nodes
+enable_fast_sync = true
+
+# Snapshot creation interval (in seconds)
+# State root is captured at this interval for fast catchup
+snapshot_interval = 300
+
+# Maximum state snapshot size to download (in MB)
+max_snapshot_size = 500
+
+# ============================================================================
+# CONTRACT SETTINGS
+# ============================================================================
+[contracts]
+# Database path for persistent smart contract storage
+db_path = "./data/contracts.db"
+
+# Maximum contract bytecode size (in bytes)
+max_bytecode_size = 1048576  # 1 MB
+
+# Enable contract caching in memory (for performance)
+enable_caching = true
+
+# Contract cache size (number of contracts to keep in memory)
+cache_size = 1000
+
+# ============================================================================
+# CONSENSUS & BLOCK PRODUCTION SETTINGS
+# ============================================================================
+[consensus]
+# Block production interval (in milliseconds)
+block_interval = 5000
+
+# Confirmation depth for finality (number of blocks)
+# Block is considered final after this many blocks on top
+confirmation_depth = 10
+
+# Blue set size for GHOSTDAG
+blue_set_size = 2
+
+# Difficulty adjustment parameters
+[consensus.difficulty]
+# Target block time (in seconds)
+target_block_time = 5
+
+# Adjust difficulty every N blocks
+adjustment_interval = 10
+
+# Maximum difficulty multiplier per adjustment
+max_adjustment_ratio = 1.5
+
+# Minimum difficulty multiplier per adjustment
+min_adjustment_ratio = 0.67
+
+# ============================================================================
+# MEMPOOL SETTINGS
+# ============================================================================
+[mempool]
+# Maximum number of transactions in mempool
+max_size = 10000
+
+# Minimum gas price accepted (in wei)
+min_gas_price = 1
+
+# Transaction eviction policy (lru = least recently used)
+eviction_policy = "lru"
+
+# ============================================================================
+# STORAGE & PRUNING SETTINGS
+# ============================================================================
+[storage]
+# Block and transaction storage database path
+db_path = "./data/blocks.db"
+
+# Pruning configuration
+[storage.pruning]
+# Enable automatic block/transaction pruning
+enabled = true
+
+# Height threshold before pruning starts
+# Blocks below this height may be pruned
+prune_height = 200000
+
+# Rolling window size for pruning
+# Keep at least this many blocks for recalculation/validation
+window_size = 100000
+
+# Prune interval check (in seconds)
+check_interval = 3600
+
+# ============================================================================
+# LOGGING SETTINGS
+# ============================================================================
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Enable structured logging (JSON format)
+structured = false
+
+# Log to file
+[logging.file]
+enabled = false
+path = "./logs/node.log"
+# Rotate log files when they exceed this size (in MB)
+max_size = 100
+# Keep this many old log files
+max_backups = 10
+
+# ============================================================================
+# METRICS & MONITORING
+# ============================================================================
+[metrics]
+# Enable Prometheus metrics endpoint
+enabled = false
+
+# Metrics listen address
+listen_addr = "127.0.0.1:9090"
+
+# Metrics collection interval (in seconds)
+interval = 60
+
+# ============================================================================
+# NODE SETTINGS
+# ============================================================================
+[node]
+# Node identifier (public key for signing blocks)
+# Leave empty to generate random on startup
+node_id = ""
+
+# Data directory for all node data
+data_dir = "./data"
+
+# Node name (for logging/display purposes)
+node_name = "cytah-node"
+
+# Enable JSON-RPC API
+enable_rpc = true
+
+# ============================================================================
+# ADVANCED SETTINGS
+# ============================================================================
+[advanced]
+# Enable transaction replay during chain reorganization
+enable_tx_replay = true
+
+# Maximum chain reorganization depth (in blocks)
+max_reorg_depth = 100
+
+# Enable memory optimizations (may reduce peak memory but slower)
+optimize_memory = false
+
+# Number of parallel executor threads
+executor_threads = 4
+
+# State cache size (number of accounts to keep in memory)
+state_cache_size = 10000
+
+# ============================================================================
+# TESTING & DEVELOPMENT ONLY
+# ============================================================================
+[development]
+# Enable test mode (faster block production, easier testing)
+test_mode = false
+
+# Test mode block interval (in milliseconds)
+test_block_interval = 1000
+
+# Enable endpoint for resetting blockchain state
+enable_reset_endpoint = false

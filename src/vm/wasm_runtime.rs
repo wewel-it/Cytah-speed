@@ -1,8 +1,5 @@
 use wasmtime::*;
 use anyhow::Result;
-use std::sync::Arc;
-
-// the `ContractRegistry` import was removed because it was unused
 
 /// Shared state passed to host functions inside the Wasm runtime.
 pub trait Storage: Send + Sync + std::any::Any {
@@ -136,8 +133,8 @@ mod tests {
                 fn table_growing(&mut self, _current: usize, _desired: usize, _maximum: Option<usize>) -> Result<bool, wasmtime::Error> { Ok(true) }
             }
             let mut l = TestLimiter { max_pages: 2 };
-            assert!(l.memory_growing(1, 2, None));
-            assert!(!l.memory_growing(2, 3, None));
+            assert!(l.memory_growing(1, 2, None).unwrap());
+            assert!(!l.memory_growing(2, 3, None).unwrap());
         }
 
         #[test]

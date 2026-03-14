@@ -17,6 +17,12 @@ pub struct BlockHeader {
     pub base_fee: u64,   // EIP-1559 style base fee burned per gas unit
     pub state_root: [u8;32], // merkle root of state after applying this block
     pub version: u32,
+
+    // GhostDAG metrics
+    pub blue_score: u64,
+    pub selected_parent: Option<BlockHash>,
+    pub chain_height: u64,
+    pub topo_index: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -25,7 +31,8 @@ pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
     pub producer: [u8; 20],
-    pub reward: f64,
+    pub reward: u64,
+    pub height: u64,
 }
 
 impl Block {
@@ -43,8 +50,8 @@ impl Block {
         producer: [u8;20],
         state_root: [u8;32],
     ) -> Self {
-        let reward = crate::consensus::calculate_reward(transactions.len())
-            + transactions.iter().map(|tx| tx.gas_price.saturating_sub(base_fee)).sum::<u64>() as f64;
+        // Base mining reward only; transaction fees will be credited separately during block execution
+        let reward = crate::consensus::calculate_reward(transactions.len());
         let header = BlockHeader {
             parent_hashes,
             timestamp,
@@ -53,6 +60,10 @@ impl Block {
             base_fee,
             state_root,
             version: 1,
+            blue_score: 0,
+            selected_parent: None,
+            chain_height: 0,
+            topo_index: 0,
         };
         let mut block = Block {
             hash: [0u8; 32],
@@ -60,6 +71,7 @@ impl Block {
             transactions,
             producer,
             reward,
+            height: 0,
         };
         block.hash = block.calculate_hash();
         block
@@ -86,6 +98,15 @@ impl Block {
         hasher.update(self.header.base_fee.to_le_bytes());
         hasher.update(&self.header.state_root);
         hasher.update(self.header.version.to_le_bytes());
+        // GhostDAG metadata - included to ensure deterministic block identity
+        hasher.update(self.header.blue_score.to_le_bytes());
+        hasher.update(self.header.chain_height.to_le_bytes());
+        hasher.update(self.header.topo_index.to_le_bytes());
+        if let Some(selected) = &self.header.selected_parent {
+            hasher.update(selected);
+        } else {
+            hasher.update(&[0u8; 32]);
+        }
         // include producer in hash so that different miners produce different blocks
         hasher.update(&self.producer);
 
@@ -109,14 +130,9 @@ impl Block {
         }
         // state_root validity is checked elsewhere (during sync)
 
-        // verify reward matches expectation (base reward + total priority fees)
-        let base = crate::consensus::calculate_reward(self.transactions.len());
-        let total_tips: u64 = self.transactions
-            .iter()
-            .map(|tx| tx.gas_price.saturating_sub(self.header.base_fee))
-            .sum();
-        let expected = base + total_tips as f64;
-        if (self.reward - expected).abs() > std::f64::EPSILON {
+        // verify reward matches expectation (base mining reward only; fees credited separately)
+        let expected = crate::consensus::calculate_reward(self.transactions.len());
+        if self.reward != expected {
             return Err(format!("Unexpected block reward: {} vs {}", self.reward, expected));
         }
 
@@ -145,6 +161,22 @@ impl Block {
             return Err("Block must have at least one parent (except genesis)".to_string());
         }
         Ok(())
+    }
+
+    /// Update GhostDAG-specific metadata and recompute hash for consistency
+    pub fn set_consensus_metadata(
+        &mut self,
+        selected_parent: Option<BlockHash>,
+        blue_score: u64,
+        chain_height: u64,
+        topo_index: u64,
+    ) {
+        self.header.selected_parent = selected_parent;
+        self.header.blue_score = blue_score;
+        self.header.chain_height = chain_height;
+        self.header.topo_index = topo_index;
+        self.height = chain_height;
+        self.hash = self.calculate_hash();
     }
 
     /// Check if this is a genesis block (no parents or explicit genesis)
@@ -184,6 +216,21 @@ impl fmt::Display for Block {
             self.header.difficulty,
             hex::encode(self.producer),
             self.reward
+        )
+    }
+}
+
+impl Default for Block {
+    fn default() -> Self {
+        Block::new(
+            vec![],
+            0,
+            vec![],
+            0,
+            0,
+            0,
+            [0; 20],
+            [0; 32],
         )
     }
 }
@@ -233,12 +280,12 @@ mod tests {
 
     #[test]
     fn test_block_with_multiple_parents() {
-        let parent1 = "hash1".to_string();
-        let parent2 = "hash2".to_string();
+        let parent1: BlockHash = [1; 32];
+        let parent2: BlockHash = [2; 32];
         let from: [u8; 20] = [1; 20];
         let to: [u8; 20] = [2; 20];
         let tx = Transaction::new(from, to, 100, 0, 21000, 1);
-        
+
         let block = Block::new(vec![parent1, parent2], 1000, vec![tx], 42, 0, 0, [0;20], [0;32]);
         assert_eq!(block.header.parent_hashes.len(), 2);
         assert!(block.validate_basic().is_ok());
@@ -260,8 +307,9 @@ mod tests {
         let from: [u8; 20] = [1; 20];
         let to: [u8; 20] = [2; 20];
         let tx = Transaction::new(from, to, 100, 0, 21000, 1);
-        let block1 = Block::new(vec!["parent1".to_string()], 1000, vec![tx.clone()], 42, 0, 0, [0;20], [0;32]);
-        let block2 = Block::new(vec!["parent1".to_string()], 1000, vec![tx], 42, 0, 0, [0;20], [0;32]);
+        let parent: BlockHash = [4; 32];
+        let block1 = Block::new(vec![parent], 1000, vec![tx.clone()], 42, 0, 0, [0;20], [0;32]);
+        let block2 = Block::new(vec![parent], 1000, vec![tx], 42, 0, 0, [0;20], [0;32]);
         
         assert_eq!(block1.hash, block2.hash); // same inputs including difficulty 0
     }
@@ -279,7 +327,9 @@ mod tests {
             txs.push(Transaction::new(from, to, 100, i, 21000, 1));
         }
         let b1 = Block::new(vec![], 1000, txs.clone(), 0, 0, 0, [0;20], [0;32]);
-        assert_eq!(b1.reward, crate::consensus::calculate_reward(50));
+        // Reward should include base reward + total tip fees (gas_price - base_fee) per tx.
+        let expected = crate::consensus::calculate_reward(50) + 50u64;
+        assert_eq!(b1.reward, expected);
     }
 
     #[test]

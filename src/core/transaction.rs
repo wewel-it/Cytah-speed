@@ -25,6 +25,11 @@ pub struct Transaction {
 }
 
 impl Transaction {
+    /// Generic constructor (alias for new_transfer) to preserve existing test expectations
+    pub fn new(from: Address, to: Address, amount: u64, nonce: u64, gas_limit: u64, gas_price: u64) -> Self {
+        Self::new_transfer(from, to, amount, nonce, gas_limit, gas_price)
+    }
+
     /// convenience ctor for transfer payload
     pub fn new_transfer(from: Address, to: Address, amount: u64, nonce: u64, gas_limit: u64, gas_price: u64) -> Self {
         Self {
@@ -33,8 +38,13 @@ impl Transaction {
             nonce,
             gas_limit,
             gas_price,
-            signature: Vec::new(),
+            signature: Signature::empty(),
         }
+    }
+
+    /// Create a minimal default transaction
+    pub fn default_transfer() -> Self {
+        Self::new_transfer([0; 20], [0; 20], 0, 0, 0, 0)
     }
 
     pub fn new_deploy(from: Address, wasm_code: Vec<u8>, init_args: Vec<u8>, nonce: u64, gas_limit: u64, gas_price: u64) -> Self {
@@ -44,7 +54,7 @@ impl Transaction {
             nonce,
             gas_limit,
             gas_price,
-            signature: Vec::new(),
+            signature: Signature::empty(),
         }
     }
 
@@ -55,7 +65,7 @@ impl Transaction {
             nonce,
             gas_limit,
             gas_price,
-            signature: Vec::new(),
+            signature: Signature::empty(),
         }
     }
 
@@ -147,6 +157,12 @@ impl Transaction {
     }
 }
 
+impl Default for Transaction {
+    fn default() -> Self {
+        Transaction::default_transfer()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,7 +210,7 @@ mod tests {
         let from: Address = [1; 20];
         let to: Address = [2; 20];
         let mut tx = Transaction::new_transfer(from, to, 100, 1, 21000, 1);
-        tx.signature = vec![0; 65]; // Invalid signature
+        tx.signature = Signature { algorithm: CryptoAlgorithm::Secp256k1, data: vec![0; 65] }; // Invalid signature
         assert!(tx.validate_basic().is_err());
     }
 }

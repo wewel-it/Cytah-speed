@@ -1,3 +1,3 @@
 pub mod node_runtime;
 
-pub use node_runtime::NodeRuntime;
+pub use node_runtime::{NodeRuntime, PeerInfo, SystemMetrics};

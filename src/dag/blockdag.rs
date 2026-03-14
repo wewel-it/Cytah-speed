@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use crate::core::{Block, BlockHash, Transaction};
+use crate::core::transaction::TxPayload;
 use crate::storage::BlockStore;
 use crate::dag::dag_index::DAGIndex;
+use crate::consensus::mining::CTS_GENESIS_ALLOCATION;
 
 /// Main BlockDAG Engine
 /// Manages the entire DAG structure, validation, and operations
@@ -41,13 +43,24 @@ impl BlockDAG {
 
     /// Create automatic genesis block
     pub fn create_genesis_block(&mut self) -> Block {
+        // Create genesis allocation transaction
+        let genesis_wallet = [0u8; 20]; // Genesis wallet address
+        let genesis_tx = Transaction::new_transfer(
+            [0u8; 20], // From burn address
+            genesis_wallet,
+            CTS_GENESIS_ALLOCATION,
+            0, // nonce
+            0, // gas_limit
+            0, // gas_price
+        );
+
         let genesis = Block::new(
             vec![],               // no parents
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            vec![],               // empty tx list
+            vec![genesis_tx],     // genesis allocation transaction
             0, // nonce
             0, // difficulty
             0, // base fee
@@ -91,13 +104,50 @@ impl BlockDAG {
             }
         }
 
-        // Step 5: Store block
-        self.store.insert_block(block.clone())?;
+        // Step 5: Annotate consensus metadata (chain height, blue score, topo index)
+        let mut annotated_block = block.clone();
 
-        // Step 6: Update DAG index
-        self.index.update_tips_after_insert(&block);
+        let (selected_parent, chain_height) = if annotated_block.header.parent_hashes.is_empty() {
+            (None, 0)
+        } else {
+            let mut best_parent = None;
+            let mut best_height = 0u64;
+            for parent_hash in &annotated_block.header.parent_hashes {
+                if let Some(parent) = self.get_block(parent_hash) {
+                    let parent_height = parent.height;
+                    if parent_height >= best_height {
+                        best_height = parent_height;
+                        best_parent = Some(*parent_hash);
+                    }
+                }
+            }
+            (best_parent, best_height.saturating_add(1))
+        };
+
+        let blue_score = self.compute_blue_score(&annotated_block);
+        let topo_index = self.block_count() as u64;
+
+        annotated_block.set_consensus_metadata(selected_parent, blue_score, chain_height, topo_index);
+
+        // Step 6: Store block
+        self.store.insert_block(annotated_block.clone())?;
+
+        // Step 7: Update DAG index
+        self.index.update_tips_after_insert(&annotated_block);
 
         Ok(())
+    }
+
+    /// Compute a basic blue score for a block based on ancestor blue scores.
+    fn compute_blue_score(&self, block: &Block) -> u64 {
+        let mut max_parent_score = 0u64;
+        for parent_hash in &block.header.parent_hashes {
+            if let Some(parent) = self.get_block(parent_hash) {
+                max_parent_score = max_parent_score.max(parent.header.blue_score);
+            }
+        }
+        // Include self in the blue score
+        max_parent_score.saturating_add(1)
     }
 
     /// Insert multiple blocks at once (batch operation)
@@ -139,6 +189,54 @@ impl BlockDAG {
             .iter()
             .filter_map(|hash| self.get_block(hash))
             .collect()
+    }
+
+    /// Get recent block timestamps following selected parents up to `max` blocks.
+    ///
+    /// This follows the selected-parent chain starting from the highest-tip block
+    /// and collects timestamps for activity-based reward calculations.
+    pub fn get_recent_timestamps(&self, max: usize) -> Vec<u64> {
+        let mut timestamps = Vec::new();
+        let tip = match self.get_tip_blocks().first() {
+            Some(t) => t.clone(),
+            None => return timestamps,
+        };
+
+        let mut current = tip;
+        while timestamps.len() < max {
+            timestamps.push(current.header.timestamp);
+            if let Some(parent_hash) = current.header.selected_parent {
+                if let Some(parent) = self.get_block(&parent_hash) {
+                    current = parent;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        timestamps.reverse(); // Oldest first
+        timestamps
+    }
+
+    /// Get recent timestamps by walking from a specific starting block hash along
+    /// the selected-parent chain.
+    pub fn get_timestamps_from_start(&self, start_hash: &BlockHash, max: usize) -> Vec<u64> {
+        let mut timestamps = Vec::new();
+        let mut current_hash = *start_hash;
+
+        while timestamps.len() < max {
+            if let Some(block) = self.get_block(&current_hash) {
+                timestamps.push(block.header.timestamp);
+                if let Some(parent_hash) = block.header.selected_parent {
+                    current_hash = parent_hash;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        timestamps.reverse();
+        timestamps
     }
 
     /// Get children of a block
@@ -282,6 +380,58 @@ impl BlockDAG {
         self.store.block_count()
     }
 
+    /// Get all block hashes in the DAG
+    pub fn get_all_block_hashes(&self) -> Vec<BlockHash> {
+        self.store.get_all_hashes()
+    }
+
+    /// Get GHOSTDAG ordering (same as topological order for now)
+    pub fn get_ordering(&self) -> Vec<BlockHash> {
+        self.get_topological_order()
+    }
+
+    /// Get block height (logical chain height or depth from genesis)
+    pub fn get_block_height(&self, hash: &BlockHash) -> Option<u64> {
+        if let Some(block) = self.get_block(hash) {
+            // Prefer explicitly stored chain height if available
+            let stored = if block.header.chain_height > 0 {
+                block.header.chain_height
+            } else if block.height > 0 {
+                block.height
+            } else {
+                0
+            };
+
+            if stored > 0 {
+                return Some(stored);
+            }
+
+            // Fallback to depth-based height
+            return Some(self.get_block_depth(hash) as u64);
+        }
+        None
+    }
+
+    /// Get parent hashes of a block
+    pub fn get_block_parents(&self, hash: &BlockHash) -> Option<Vec<BlockHash>> {
+        self.get_block(hash).map(|block| block.header.parent_hashes.clone())
+    }
+
+    /// Get blue set for a block (simplified: all ancestors for now)
+    /// In a full GHOSTDAG implementation, this would compute the blue set
+    pub fn get_blue_set(&self, hash: &BlockHash) -> Option<HashSet<BlockHash>> {
+        if !self.store.block_exists(hash) {
+            return None;
+        }
+
+        let mut blue_set = HashSet::new();
+        let ancestors = self.get_ancestors(hash);
+        blue_set.extend(ancestors);
+        blue_set.insert(*hash); // Include the block itself
+
+        Some(blue_set)
+    }
+
     /// Export full DAG structure
     pub fn export_dag(&self) -> DAGExport {
         DAGExport {
@@ -369,7 +519,8 @@ mod tests {
         let genesis = create_test_block("genesis", vec![]);
         dag.insert_block(genesis).unwrap();
 
-        let block = create_test_block("test", vec!["nonexistent".to_string()]);
+        let missing_parent: crate::core::BlockHash = [0; 32];
+        let block = create_test_block("test", vec![missing_parent]);
         let result = dag.insert_block(block);
         assert!(result.is_err());
     }

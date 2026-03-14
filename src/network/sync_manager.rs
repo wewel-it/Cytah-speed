@@ -76,15 +76,46 @@ impl SyncManager {
     }
 
     /// Detect missing blocks by comparing with peers
+    /// This function queries sync-capable peers for their DAG tips,
+    /// compares with local tips, and identifies blocks that we're missing.
     pub async fn detect_missing_blocks(&self) -> Result<Vec<BlockHash>, String> {
         let _local_tips = {
             let dag = self.dag.read();
-            dag.get_tips().to_vec()
+            dag.get_tips()
         };
 
-        // In a real implementation, we would query peers for their tips
-        // and compute the difference. For now, return empty.
-        Ok(Vec::new())
+        let sync_peers = self.peer_manager.get_sync_peers(3);
+        if sync_peers.is_empty() {
+            return Ok(Vec::new()); // No sync peers available
+        }
+
+        let missing_blocks = HashSet::new();
+        let dag_read = self.dag.read();
+
+        // Query each peer for their tips and request missing ancestors
+        for peer in &sync_peers {
+            // Request headers starting from our local tips
+            // The peer will respond with blocks we don't have
+            let message = NetworkMessage::GetHeaders {
+                from: [0u8; 32], // Request from genesis (all new blocks)
+                max: 1000,       // Request up to 1000 headers at a time
+            };
+            
+            if let Err(e) = self.message_sender.send((peer.clone(), message)) {
+                tracing::warn!("Failed to request headers from peer {}: {}", peer, e);
+                continue;
+            }
+        }
+
+        drop(dag_read); // Release lock
+
+        // NOTE: The actual block comparison happens when we receive
+        // headers from peers in handle_headers(). This function initiates
+        // the discovery process. In a more sophisticated implementation,
+        // we could maintain bidirectional state and keep track of peer DAG
+        // heights to make smarter decisions about which blocks to request.
+
+        Ok(missing_blocks.into_iter().collect())
     }
 
     /// Request missing blocks from peers
@@ -140,15 +171,28 @@ impl SyncManager {
         pending.is_empty()
     }
 
-    /// Process a batch of headers received from a peer
-    pub async fn handle_headers(&self, headers: Vec<BlockHeader>) -> Result<(), String> {
-        let mut dag = self.dag.write();
-        for h in headers {
-            // create placeholder block carrying only header information
-            let mut blk = Block::new(vec![], h.timestamp, vec![], 0, h.difficulty, h.base_fee, [0;20], h.state_root);
-            blk.header = h.clone();
-            dag.insert_block(blk)?;
+    /// Process a batch of headers received from a peer.
+    ///
+    /// Each header is accompanied by the block hash so we can request missing
+    /// blocks directly. This implementation detects which hashes are missing
+    /// locally and requests them from available peers.
+    pub async fn handle_headers(&self, headers: Vec<(BlockHash, BlockHeader)>) -> Result<(), String> {
+        let mut missing = Vec::new();
+
+        {
+            let dag = self.dag.read();
+            for (hash, _header) in headers {
+                if dag.get_block(&hash).is_none() {
+                    missing.push(hash);
+                }
+            }
         }
+
+        if !missing.is_empty() {
+            tracing::info!(count = missing.len(), "Detected missing blocks from headers, requesting...");
+            self.request_missing_blocks(missing).await?;
+        }
+
         Ok(())
     }
 
@@ -169,7 +213,7 @@ impl SyncManager {
                         continue;
                     }
                     if let Some(b) = dag.get_block(&hash) {
-                        headers.push(b.header.clone());
+                        headers.push((hash, b.header.clone()));
                         if headers.len() >= max {
                             break;
                         }
@@ -177,6 +221,10 @@ impl SyncManager {
                 }
                 let _ = self.message_sender.send((peer, NetworkMessage::Headers(headers)));
                 Ok(())
+            }
+            NetworkMessage::Headers(headers) => {
+                // Process incoming headers and request missing blocks
+                self.handle_headers(headers).await
             }
             NetworkMessage::GetBlocks(hashes) => {
                 let mut blocks = Vec::new();

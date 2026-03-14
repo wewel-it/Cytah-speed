@@ -2,10 +2,9 @@ use crate::core::transaction::Address;
 use crate::state::state_tree::{SparseMerkleTree, Account};
 
 // bring serde traits into scope for serialization
-use serde::{Serialize, Deserialize};
 
-#[allow(unused_imports)]
-use serde::{Serialize as _Serialize, Deserialize as _Deserialize};
+pub const GENESIS_WALLET: Address = [1u8; 20];
+pub const EMISSION_STATE_ACCOUNT: Address = [255u8; 20];
 
 pub type Hash = [u8; 32];
 
@@ -17,13 +16,83 @@ pub struct StateManager {
 
 impl StateManager {
     pub fn new() -> Self {
-        let state_tree = SparseMerkleTree::new();
+        let mut state_tree = SparseMerkleTree::new();
+
+        // Initialize the genesis wallet and emission tracker in state
+        // These accounts are created once and remain persistent.
+        state_tree.update_account(GENESIS_WALLET, Account::new(0, 0));
+        state_tree.update_account(EMISSION_STATE_ACCOUNT, Account::new(0, 0));
+
         let current_state_root = state_tree.calculate_root();
         Self {
             state_tree,
             current_state_root,
         }
     }
+
+    /// Initialize genesis allocation and emission tracking if not already set.
+    ///
+    /// This is safe to call repeatedly; it does not overwrite existing balances.
+    pub fn initialize_tokenomics(&mut self) {
+        // Genesis allocation: 100M CTS to the genesis wallet
+        if self.state_tree.get_account(&GENESIS_WALLET).is_none() {
+            self.state_tree.update_account(GENESIS_WALLET, Account::new(0, 0));
+        }
+        let genesis_account = self.state_tree.get_account(&GENESIS_WALLET).cloned().unwrap();
+        if genesis_account.balance == 0 {
+            self.state_tree.update_account(GENESIS_WALLET, Account::new(100_000_000, genesis_account.nonce));
+        }
+
+        // Ensure emission tracker exists
+        if self.state_tree.get_account(&EMISSION_STATE_ACCOUNT).is_none() {
+            self.state_tree.update_account(EMISSION_STATE_ACCOUNT, Account::new(0, 0));
+        }
+
+        self.current_state_root = self.state_tree.calculate_root();
+    }
+
+    /// Get the total emitted supply (mining rewards) tracked in state.
+    pub fn get_emitted_supply(&self) -> u64 {
+        self.state_tree
+            .get_account(&EMISSION_STATE_ACCOUNT)
+            .map(|acc| acc.balance)
+            .unwrap_or(0)
+    }
+
+    /// Add to the emitted supply counter.
+    pub fn add_emitted_supply(&mut self, amount: u64) {
+        if amount == 0 {
+            return;
+        }
+
+        // Ensure we never exceed the mining supply cap.
+        let mut acc = self.state_tree.get_account(&EMISSION_STATE_ACCOUNT)
+            .cloned()
+            .unwrap_or(Account::new(0, 0));
+        let remaining = crate::consensus::mining::CTS_MINING_SUPPLY.saturating_sub(acc.balance);
+        if remaining == 0 {
+            return;
+        }
+
+        let to_add = amount.min(remaining);
+        acc.balance = acc.balance.saturating_add(to_add);
+        self.state_tree.update_account(EMISSION_STATE_ACCOUNT, acc);
+        self.current_state_root = self.state_tree.calculate_root();
+    }
+
+    /// Get total supply of tokens in circulation
+    pub fn get_total_supply(&self) -> u64 {
+        let mut total = 0u64;
+        self.state_tree.iter_accounts(|addr, account| {
+            if *addr == EMISSION_STATE_ACCOUNT {
+                // This account is used to track emitted supply and is not a real balance holder
+                return;
+            }
+            total = total.saturating_add(account.balance);
+        });
+        total
+    }
+
 
     /// Apply a transaction and charge its associated gas fee.  For simple
     /// transfers we assume the full gas limit is consumed; more accurate
@@ -137,6 +206,13 @@ impl StateManager {
         if amount == 0 {
             return Ok(());
         }
+
+        // Enforce global supply cap (600M CTS): cannot mint more tokens beyond the hard cap.
+        let current_supply = self.get_total_supply();
+        if current_supply.saturating_add(amount) > crate::consensus::mining::CTS_MAX_SUPPLY {
+            return Err("Cannot mint beyond maximum supply".to_string());
+        }
+
         let account = self.state_tree.get_account(&to)
             .cloned()
             .unwrap_or(Account::new(0, 0));
@@ -149,6 +225,17 @@ impl StateManager {
 
     pub fn get_account(&self, address: &Address) -> Option<&Account> {
         self.state_tree.get_account(address)
+    }
+
+    /// Get count of accounts with non-zero balance
+    pub fn get_active_account_count(&self) -> u64 {
+        let mut count = 0u64;
+        self.state_tree.iter_accounts(|_addr, account| {
+            if account.balance > 0 {
+                count += 1;
+            }
+        });
+        count
     }
 
     /// Helper invoked by the node runtime when a new block arrives.  This
@@ -185,6 +272,7 @@ impl StateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Transaction;
     use secp256k1::{Secp256k1, SecretKey};
     use rand::{Rng, thread_rng};
 

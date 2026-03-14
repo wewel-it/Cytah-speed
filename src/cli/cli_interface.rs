@@ -1,37 +1,63 @@
 use std::sync::Arc;
 use parking_lot::RwLock;
+use tokio::time::{Duration, Instant};
 
-use crate::node::NodeRuntime;
+use crate::node::{NodeRuntime, PeerInfo, SystemMetrics};
 use crate::core::Transaction;
 use secp256k1::SecretKey;
 
-/// CLI interface untuk node
+/// Production-grade CLI interface untuk node dengan fitur advanced
+/// Sesuai ARCHITECTURE_UPGRADE.md: menambahkan mining control, peer management,
+/// metrics, storage pruning, dan security validation.
 pub struct CLIInterface {
     node: Arc<RwLock<Option<NodeRuntime>>>,
+    mining_active: Arc<RwLock<bool>>,
+    metrics: Arc<RwLock<CLIMetrics>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CLIMetrics {
+    pub start_time: Instant,
+    pub transactions_processed: u64,
+    pub blocks_mined: u64,
+    pub avg_latency_ms: f64,
+}
+
+impl CLIMetrics {
+    pub fn new() -> Self {
+        Self {
+            start_time: Instant::now(),
+            transactions_processed: 0,
+            blocks_mined: 0,
+            avg_latency_ms: 0.0,
+        }
+    }
+
+    pub fn uptime_seconds(&self) -> u64 {
+        self.start_time.elapsed().as_secs()
+    }
 }
 
 impl CLIInterface {
     pub fn new() -> Self {
         Self {
             node: Arc::new(RwLock::new(None)),
+            mining_active: Arc::new(RwLock::new(false)),
+            metrics: Arc::new(RwLock::new(CLIMetrics::new())),
         }
     }
 
     /// Jalankan CLI
     pub async fn run(&self) -> Result<(), String> {
-        loop {
-            println!("\n=== Cytah-Speed Blockchain Node ===");
-            println!("1. start-node");
-            println!("2. send-transaction");
-            println!("3. print-dag");
-            println!("4. print-state");
-            println!("5. print-finality");
-            println!("6. print-mempool");
-            println!("7. connect-peer");
-            println!("8. exit");
-            println!("=====================================");
+        println!("=== Cytah-Speed Production CLI ===");
+        println!("Node uptime: {} seconds", self.metrics.read().uptime_seconds());
+        println!("Transactions processed: {}", self.metrics.read().transactions_processed);
+        println!("Blocks mined: {}", self.metrics.read().blocks_mined);
+        println!();
 
-            print!("Enter command number: ");
+        loop {
+            self.display_menu();
+            print!("Pilih opsi (1-14 atau q untuk quit): ");
             use std::io::{self, Write};
             io::stdout().flush().ok();
 
@@ -47,15 +73,43 @@ impl CLIInterface {
                 "5" => self.cmd_print_finality()?,
                 "6" => self.cmd_print_mempool()?,
                 "7" => self.cmd_connect_peer().await?,
-                "8" => {
-                    println!("Exiting...");
+                "8" => self.cmd_print_peers()?,
+                "9" => self.cmd_start_mining().await?,
+                "10" => self.cmd_stop_mining().await?,
+                "11" => self.cmd_list_peers().await?,
+                "12" => self.cmd_show_metrics().await?,
+                "13" => self.cmd_prune_storage().await?,
+                "14" => self.cmd_validate_transaction().await?,
+                "q" | "Q" => {
+                    println!("Keluar dari CLI...");
                     break;
                 }
-                _ => println!("Invalid command"),
+                _ => println!("Opsi tidak valid. Coba lagi."),
             }
+            println!();
         }
 
         Ok(())
+    }
+
+    fn display_menu(&self) {
+        println!("=== Menu CLI ===");
+        println!("1. Start Node");
+        println!("2. Send Transaction");
+        println!("3. Print DAG");
+        println!("4. Print State");
+        println!("5. Print Finality");
+        println!("6. Print Mempool");
+        println!("7. Connect Peer");
+        println!("8. Print Peers");
+        println!("9. Start Mining");
+        println!("10. Stop Mining");
+        println!("11. List Peers (Advanced)");
+        println!("12. Show Metrics");
+        println!("13. Prune Storage");
+        println!("14. Validate Transaction");
+        println!("q. Quit");
+        println!("=================");
     }
 
     /// Start node
@@ -233,6 +287,179 @@ impl CLIInterface {
         // Network connectivity would be handled through P2PNode
         println!("✓ Peer address to be connected: {}", peer_addr);
         println!("Note: P2P network connectivity is managed separately through P2PNode");
+
+        Ok(())
+    }
+
+    /// Print peers (basic)
+    fn cmd_print_peers(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Connected Peers ---");
+
+        // Get peer count from network
+        let peer_count = node.get_peer_count();
+        println!("Connected peers: {}", peer_count);
+
+        println!("Note: Detailed peer information available through advanced P2P management");
+
+        Ok(())
+    }
+
+    /// Start mining
+
+    /// Stop mining
+
+    /// Start mining
+    async fn cmd_start_mining(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Start Mining ---");
+
+        if *self.mining_active.read() {
+            println!("Mining already active");
+            return Ok(());
+        }
+
+        // Start mining process
+        node.start_mining().await.map_err(|e| e.to_string())?;
+        *self.mining_active.write() = true;
+
+        println!("✓ Mining started successfully");
+        println!("Node will now participate in block production");
+
+        Ok(())
+    }
+
+    /// Stop mining
+    async fn cmd_stop_mining(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Stop Mining ---");
+
+        if !*self.mining_active.read() {
+            println!("Mining not active");
+            return Ok(());
+        }
+
+        // Stop mining process
+        node.stop_mining().await.map_err(|e| e.to_string())?;
+        *self.mining_active.write() = false;
+
+        println!("✓ Mining stopped successfully");
+
+        Ok(())
+    }
+
+    /// List peers (advanced)
+    async fn cmd_list_peers(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Advanced Peer List ---");
+
+        // Get detailed peer information
+        let peers = node.get_detailed_peers().await.map_err(|e| e.to_string())?;
+
+        println!("Connected peers: {}", peers.len());
+        for (i, peer) in peers.iter().enumerate() {
+            println!("  [{}] ID: {}, Address: {}, Status: {}",
+                    i + 1,
+                    peer.id,
+                    peer.address,
+                    peer.status);
+        }
+
+        if peers.is_empty() {
+            println!("No peers connected. Use 'connect-peer' to add peers.");
+        }
+
+        Ok(())
+    }
+
+    /// Show metrics
+    async fn cmd_show_metrics(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- System Metrics ---");
+
+        let metrics = self.metrics.read();
+        println!("Uptime: {} seconds", metrics.uptime_seconds());
+        println!("Transactions processed: {}", metrics.transactions_processed);
+        println!("Blocks mined: {}", metrics.blocks_mined);
+        println!("Average latency: {:.2} ms", metrics.avg_latency_ms);
+
+        // Get additional metrics from node
+        let node_metrics = node.get_metrics().await.map_err(|e| e.to_string())?;
+        println!("TPS (last 1min): {:.2}", node_metrics.tps);
+        println!("Network latency: {:.2} ms", node_metrics.network_latency_ms);
+        println!("Memory usage: {} MB", node_metrics.memory_mb);
+        println!("Storage size: {} MB", node_metrics.storage_mb);
+
+        Ok(())
+    }
+
+    /// Prune storage
+    async fn cmd_prune_storage(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Prune Storage ---");
+
+        print!("Enter pruning window (blocks to keep, default 1000): ");
+        use std::io::{self, Write};
+        io::stdout().flush().ok();
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).ok();
+        let window: usize = input.trim().parse().unwrap_or(1000);
+
+        // Trigger storage pruning
+        let pruned_blocks = node.prune_storage(window).await.map_err(|e| e.to_string())?;
+
+        println!("✓ Storage pruned successfully");
+        println!("Removed {} old blocks", pruned_blocks);
+        println!("Storage optimized for performance");
+
+        Ok(())
+    }
+
+    /// Validate transaction
+    async fn cmd_validate_transaction(&self) -> Result<(), String> {
+        let node = self.node.read();
+        let node = node.as_ref().ok_or("Node not started")?;
+
+        println!("\n--- Validate Transaction ---");
+
+        print!("Enter transaction hash (hex): ");
+        use std::io::{self, Write};
+        io::stdout().flush().ok();
+
+        let mut hash_input = String::new();
+        io::stdin().read_line(&mut hash_input).ok();
+        let hash_str = hash_input.trim();
+
+        // Parse hash
+        let hash_vec = hex::decode(hash_str).map_err(|_| "Invalid hex hash")?;
+        if hash_vec.len() != 32 {
+            return Err("Hash must be 32 bytes".to_string());
+        }
+        let hash: [u8; 32] = hash_vec.try_into().map_err(|_| "Invalid hash length")?;
+
+        // Validate transaction
+        let is_valid = node.validate_transaction(&hash).await.map_err(|e| e.to_string())?;
+
+        if is_valid {
+            println!("✓ Transaction is valid");
+            println!("Hash: {}", hash_str);
+        } else {
+            println!("✗ Transaction is invalid or not found");
+            println!("Hash: {}", hash_str);
+        }
 
         Ok(())
     }

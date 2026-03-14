@@ -17,6 +17,7 @@ pub type TxId = [u8; 32];
 pub enum StateKey {
     Account(Address),                // whole account (balance, nonce)
     ContractStorage(Address, Vec<u8>), // contract address + storage key; empty Vec means wildcard
+    ContractRegistry(Address),       // contract registry entry for a given address
 }
 
 /// The read/write sets for a single transaction.
@@ -50,6 +51,7 @@ pub fn analyze_access(tx: &Transaction) -> TxAccessSet {
             address.copy_from_slice(&hash[0..20]);
             writes.insert(StateKey::Account(address));
             writes.insert(StateKey::ContractStorage(address, Vec::new()));
+            writes.insert(StateKey::ContractRegistry(address));
         }
         TxPayload::ContractCall { contract_address, .. } => {
             reads.insert(StateKey::Account(*contract_address));
@@ -57,6 +59,8 @@ pub fn analyze_access(tx: &Transaction) -> TxAccessSet {
             // wildcard storage access for this contract
             reads.insert(StateKey::ContractStorage(*contract_address, Vec::new()));
             writes.insert(StateKey::ContractStorage(*contract_address, Vec::new()));
+            // reading from contract registry (must happen after deploy)
+            reads.insert(StateKey::ContractRegistry(*contract_address));
         }
     }
 
@@ -114,13 +118,19 @@ pub fn schedule_parallel_batches(txs: Vec<Transaction>) -> Vec<ParallelBatch> {
     let graph = build_conflict_graph(&txs);
     let mut colors: Vec<usize> = vec![0; txs.len()];
 
+    // Keep a map of tx hash -> original index to preserve ordering
+    let mut index_map: HashMap<TxId, usize> = HashMap::new();
+    for (i, tx) in txs.iter().enumerate() {
+        index_map.insert(tx.hash(), i);
+    }
+
     for i in 0..txs.len() {
         let mut forbidden = HashSet::new();
         let id_i = txs[i].hash();
         if let Some(neighbors) = graph.edges.get(&id_i) {
             for nid in neighbors {
-                if let Some(pos) = txs.iter().position(|tx| tx.hash() == *nid) {
-                    forbidden.insert(colors[pos]);
+                if let Some(pos) = index_map.get(nid) {
+                    forbidden.insert(colors[*pos]);
                 }
             }
         }
@@ -140,8 +150,18 @@ pub fn schedule_parallel_batches(txs: Vec<Transaction>) -> Vec<ParallelBatch> {
             .push(txs[i].clone());
     }
     let mut batches: Vec<ParallelBatch> = batches_map.into_iter().map(|(_, b)| b).collect();
-    // sort batches by first transaction hash to make deterministic
-    batches.sort_by_key(|b| b.transactions[0].hash());
+
+    // sort batches by the earliest original transaction index to maintain deterministic
+    // order and ensure sequential semantics for conflicting transactions
+    batches.sort_by_key(|batch| {
+        batch
+            .transactions
+            .iter()
+            .map(|tx| index_map.get(&tx.hash()).copied().unwrap_or(usize::MAX))
+            .min()
+            .unwrap_or(usize::MAX)
+    });
+
     batches
 }
 
@@ -358,6 +378,8 @@ fn execute_transaction(
                 receipt.error = Some(e);
                 return receipt;
             }
+            // increment sender nonce for transaction ordering
+            sender_acc.nonce += 1;
             overlay.state.write_account(from, sender_acc.clone());
 
             if success {
@@ -407,6 +429,8 @@ fn execute_transaction(
                 receipt.error = Some(e);
                 return receipt;
             }
+            // increment nonce for a successful contract call
+            sender_acc.nonce += 1;
             overlay.state.write_account(from, sender_acc.clone());
             match result {
                 Ok(_) => {
@@ -498,7 +522,7 @@ mod tests {
     use super::*;
     use crate::core::transaction::{Transaction, Address};
     use secp256k1::{Secp256k1, SecretKey};
-    use sha2::Sha256;
+    use sha2::{Digest, Sha256};
     use rand::{rngs::OsRng, RngCore};
     use wat::parse_str;
 
@@ -521,7 +545,8 @@ mod tests {
     #[test]
     fn independent_transfers_parallel() {
         let mut state = StateManager::new();
-        let mut registry = ContractRegistry::new();
+        let mut registry = ContractRegistry::new("./data/test_contract_registry_parallel.db")
+            .expect("Should create registry");
         let storage = Arc::new(ContractStorage::new("test_storage_parallel"));
 
         let secp = Secp256k1::new();
@@ -552,7 +577,8 @@ mod tests {
     #[test]
     fn conflicting_transfers_sequential() {
         let mut state = StateManager::new();
-        let mut registry = ContractRegistry::new();
+        let mut registry = ContractRegistry::new("./data/test_contract_registry_conflict.db")
+            .expect("Should create registry");
         let storage = Arc::new(ContractStorage::new("test_storage_conflict"));
 
         let secp = Secp256k1::new();
@@ -565,7 +591,8 @@ mod tests {
         funded_account(&mut state, addr, 1_000_000);
 
         let tx1 = sign_tx(Transaction::new_transfer(addr, rec_a, 100, 0, 21000, 1), &privk);
-        let tx2 = sign_tx(Transaction::new_transfer(addr, rec_b, 200, 0, 21000, 1), &privk);
+        // second tx should use the next nonce to be valid after tx1
+        let tx2 = sign_tx(Transaction::new_transfer(addr, rec_b, 200, 1, 21000, 1), &privk);
         let receipts = execute_block_transactions_parallel(vec![tx1.clone(), tx2.clone()], &mut state, &mut registry, storage.clone());
 
         // both should succeed but one will run after the other because they conflict
@@ -579,7 +606,8 @@ mod tests {
     #[test]
     fn contract_call_executes() {
         let mut state = StateManager::new();
-        let mut registry = ContractRegistry::new();
+        let mut registry = ContractRegistry::new("./data/test_contract_registry_call.db")
+            .expect("Should create registry");
         let storage = Arc::new(ContractStorage::new("test_storage_contract"));
 
         let secp = Secp256k1::new();
@@ -589,7 +617,7 @@ mod tests {
         funded_account(&mut state, addr, 1_000_000);
 
         // create a trivial wasm module that exports a function "foo" that does nothing
-        let wat = r#"(module (func (export \"foo\")))"#;
+        let wat = r#"(module (func (export "foo") (nop)))"#;
         let wasm = parse_str(wat).unwrap();
 
         let deploy_tx = sign_tx(Transaction::new_deploy(addr, wasm.clone(), vec![], 0, 100000, 1), &privk);
@@ -597,7 +625,8 @@ mod tests {
         let receipts = execute_block_transactions_parallel(vec![deploy_tx.clone(), call_tx.clone()], &mut state, &mut registry, storage.clone());
 
         assert_eq!(receipts.len(), 2);
-        assert!(receipts[0].success && receipts[1].success);
+        assert!(receipts[0].success, "Deploy failed: {:?}", receipts[0].error);
+        assert!(receipts[1].success, "Call failed: {:?}", receipts[1].error);
         assert!(receipts[0].gas_used > 0);
         assert!(receipts[1].gas_used > 0);
         // state root deterministic check
@@ -609,7 +638,8 @@ mod tests {
     #[test]
     fn gas_accounting_and_overlay() {
         let mut state = StateManager::new();
-        let mut registry = ContractRegistry::new();
+        let mut registry = ContractRegistry::new("./data/test_contract_registry_gas.db")
+            .expect("Should create registry");
         let storage = Arc::new(ContractStorage::new("test_storage_gas"));
 
         let secp = Secp256k1::new();

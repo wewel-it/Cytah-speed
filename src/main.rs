@@ -16,7 +16,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║ BlockDAG + GHOSTDAG + State Execution + Finality ║");
     println!("╚═══════════════════════════════════════════════════╝\n");
 
-    // Parse CLI
+    // If no CLI arguments are provided, start the interactive menu.
+    // This keeps compatibility with existing CLI subcommands.
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() <= 1 {
+        // Interactive mode
+        let interactive = cytah_core::cli::interactive::InteractiveCli::new();
+        interactive.run().await?;
+        return Ok(());
+    }
+
+    // Parse CLI arguments (legacy mode)
     let cli = Cli::parse();
     let handler = CliHandler::new();
 
